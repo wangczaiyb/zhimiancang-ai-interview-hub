@@ -9,6 +9,15 @@
       <el-form :model="form" class="auth-form" @submit.prevent="handleRegister">
         <el-form-item>
           <el-input
+            v-model="form.name"
+            placeholder="请输入您的真实姓名"
+            prefix-icon="User"
+            size="large"
+          />
+        </el-form-item>
+
+        <el-form-item>
+          <el-input
             v-model="form.email"
             placeholder="请输入电子邮箱 (如 student@example.com)"
             prefix-icon="Message"
@@ -77,13 +86,14 @@ import { useRouter } from 'vue-router'
 import { authApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage } from 'element-plus'
-import { Message, Iphone, Lock } from '@element-plus/icons-vue'
+import { Message, Iphone, Lock, User } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const authStore = useAuthStore()
 
 const loading = ref(false)
 const form = reactive({
+  name: '',
   email: '',
   phone: '',
   password: '',
@@ -92,6 +102,10 @@ const form = reactive({
 })
 
 const handleRegister = async () => {
+  if (!form.name.trim()) {
+    ElMessage.warning('请填写您的真实姓名')
+    return
+  }
   if (!form.email || !form.password) {
     ElMessage.warning('请填写邮箱和密码')
     return
@@ -116,7 +130,7 @@ const handleRegister = async () => {
       name: res.name
     })
     ElMessage.success('注册成功！进入个人初始偏好引导')
-    router.push('/personal/onboarding')
+    router.push('/onboarding')
   } catch (e) {
     // Handled by axios interceptor
   } finally {

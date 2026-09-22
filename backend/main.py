@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
-from app.core.database import engine, Base, SessionLocal
+from app.core.database import engine, Base, SessionLocal, ensure_schema
 import app.models # Register all models
 
 from app.api.v1 import (
@@ -12,9 +12,12 @@ from app.api.v1 import (
     personal, interviews, enterprise, admin, files
 )
 from app.websocket.interview_ws import handle_interview_websocket
+from app.websocket.notification_ws import handle_notification_websocket
 
 # Create database tables automatically
 Base.metadata.create_all(bind=engine)
+# Lightweight incremental migration for columns added after initial release
+ensure_schema()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -52,6 +55,11 @@ app.include_router(files.router, prefix=api_v1_prefix)
 @app.websocket("/ws/interviews/{interview_id}")
 async def websocket_interview_endpoint(websocket: WebSocket, interview_id: int):
     await handle_interview_websocket(websocket, interview_id)
+
+# WebSocket notification push endpoint
+@app.websocket("/ws/notifications/{user_id}")
+async def websocket_notification_endpoint(websocket: WebSocket, user_id: int):
+    await handle_notification_websocket(websocket, user_id)
 
 # Global Exception Handler to ensure standard response structure {code, message, data}
 @app.exception_handler(HTTPException)

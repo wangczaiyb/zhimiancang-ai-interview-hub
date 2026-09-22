@@ -11,6 +11,7 @@ from app.models.job import Job, JobSkill, JobCompetency, JobFavorite
 from app.models.resume import Resume
 from app.models.application import Application, ApplicationStatusHistory
 from app.models.system import Notification
+from app.websocket.notification_ws import manager
 from app.schemas.common import ResponseModel, PaginatedData
 from app.schemas.job import JobOut, SkillRequirement, CompetencyWeight
 from app.schemas.application import ApplicationCreate, ApplicationOut
@@ -297,6 +298,9 @@ def apply_job(id: int, req: ApplicationCreate, current_user: User = Depends(requ
         db.add(noti)
 
     db.commit()
+    if company_members:
+        for m in company_members:
+            manager.publish(m.user_id, {"type": "new_notification"})
     log_operation(db, current_user.id, snapshot['candidate_name'], "PERSONAL", "JOB_APPLY", "APPLICATION", application.id, f"投递岗位【{job.title}】")
 
     return ResponseModel(data={"application_id": application.id, "message": "投递成功！已同步至企业候选人列表"})

@@ -12,7 +12,7 @@
 
         <el-form label-position="top">
           <el-form-item label="目标面试岗位" required>
-            <el-select v-model="form.job_id" placeholder="请选择目标岗位" style="width: 100%;">
+            <el-select v-model="form.job_id" placeholder="请选择目标岗位" style="width: 100%;" @change="handleJobChange">
               <el-option
                 v-for="j in jobs"
                 :key="j.id"
@@ -22,15 +22,25 @@
             </el-select>
           </el-form-item>
 
+          <el-form-item label="岗位 JD (自动带出，可手动修改)">
+            <el-input
+              v-model="form.jd_text"
+              type="textarea"
+              :rows="5"
+              placeholder="选择岗位后会自动带出该岗位的 JD；你也可以直接粘贴/修改 JD 文本，AI 将据此生成面试题"
+            />
+          </el-form-item>
+
           <el-form-item label="选择本次使用的个人简历">
             <el-select v-model="form.resume_id" placeholder="请选择简历" style="width: 100%;">
               <el-option
                 v-for="r in resumes"
                 :key="r.id"
-                :label="r.name"
+                :label="`${r.name} (完整度 ${r.completeness}%)`"
                 :value="r.id"
               />
             </el-select>
+            <span v-if="!resumes.length" class="form-hint">尚未上传简历，可先前往「简历中心」上传后再进行个性化面试</span>
           </el-form-item>
 
           <el-form-item label="面试模式" required>
@@ -152,12 +162,35 @@ const modeOptions = [
 
 const form = reactive({
   job_id: 1,
-  resume_id: 1,
+  resume_id: undefined as number | undefined,
+  jd_text: '',
   mode: 'TECHNICAL',
   difficulty: 'MEDIUM',
   total_questions: 5,
   type: 'PERSONAL_TRAINING'
 })
+
+// 根据所选岗位自动带出 JD 文本（用户可在此基础上手动修改）
+const fillJdFromJob = (jobId: number) => {
+  const job = jobs.value.find(j => j.id === jobId)
+  if (!job) return
+  const parts = [
+    `岗位名称：${job.title}`,
+    `学历要求：${job.education || '-'}｜经验要求：${job.experience || '-'}｜工作城市：${job.city || '-'}`
+  ]
+  if (job.skills?.length) {
+    parts.push('技能要求：' + job.skills.map((s: any) => s.skill_name).join('、'))
+  }
+  if (job.description) parts.push(`岗位描述：${job.description}`)
+  if (job.duties) parts.push(`岗位职责：${job.duties}`)
+  if (job.requirements) parts.push(`任职要求：${job.requirements}`)
+  if (job.bonus) parts.push(`加分项：${job.bonus}`)
+  form.jd_text = parts.join('\n')
+}
+
+const handleJobChange = (jobId: number) => {
+  fillJdFromJob(jobId)
+}
 
 onMounted(async () => {
   try {
@@ -168,11 +201,15 @@ onMounted(async () => {
     } else if (jobs.value.length > 0) {
       form.job_id = jobs.value[0].id
     }
+    // 自动带出 JD
+    fillJdFromJob(form.job_id)
 
     const rList: any = await resumeApi.listResumes()
     resumes.value = rList || []
     if (resumes.value.length > 0) {
-      form.resume_id = resumes.value[0].id
+      // 优先选择默认简历
+      const defaultResume = resumes.value.find((r: any) => r.is_default)
+      form.resume_id = (defaultResume || resumes.value[0]).id
     }
 
     if (route.query.appId) {
@@ -193,11 +230,12 @@ const handleStartInterview = async () => {
       mode: form.mode,
       difficulty: form.difficulty,
       total_questions: form.total_questions,
-      duration_minutes: form.total_questions * 5
+      duration_minutes: form.total_questions * 5,
+      jd_text: form.jd_text
     })
 
     ElMessage.success('面试准备就绪，正在接入 AI 面试仓...')
-    router.push(`/personal/interviews/${res.id}/session`)
+    router.push(`/personal/interviews/${res.id}/room`)
   } catch (e) {
     // handled
   } finally {
@@ -286,6 +324,13 @@ const handleStartInterview = async () => {
 .form-row {
   display: flex;
   gap: 24px;
+}
+
+.form-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #F59E0B;
 }
 
 .device-checks {

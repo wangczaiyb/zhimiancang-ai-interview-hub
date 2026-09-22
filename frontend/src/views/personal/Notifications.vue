@@ -1,8 +1,13 @@
 <template>
   <div class="notifications-page">
     <div class="header-box zh-card">
-      <h2 class="title">消息与通知中心</h2>
-      <p class="subtitle">汇集企业面试邀请、招聘推进状态、系统提醒与学习关怀</p>
+      <div class="header-content">
+        <div>
+          <h2 class="title">消息与通知中心</h2>
+          <p class="subtitle">汇集企业面试邀请、招聘推进状态、系统提醒与学习关怀</p>
+        </div>
+        <el-button :loading="markingAll" @click="markAllRead">全部已读</el-button>
+      </div>
     </div>
 
     <StateContainer :loading="loading" :empty="!loading && notis.length === 0" empty-text="暂无新消息通知">
@@ -39,9 +44,11 @@
 import { ref, onMounted } from 'vue'
 import { personalApi } from '@/api'
 import StateContainer from '@/components/StateContainer.vue'
+import { ElMessage } from 'element-plus'
 import { Bell } from '@element-plus/icons-vue'
 
 const loading = ref(true)
+const markingAll = ref(false)
 const notis = ref<any[]>([])
 
 const loadNotis = async () => {
@@ -53,6 +60,19 @@ const loadNotis = async () => {
     // handled
   } finally {
     loading.value = false
+  }
+}
+
+const markAllRead = async () => {
+  markingAll.value = true
+  try {
+    await personalApi.markAllNotificationsRead()
+    ElMessage.success('全部消息已标记为已读')
+    loadNotis()
+  } catch (e) {
+    // handled
+  } finally {
+    markingAll.value = false
   }
 }
 
@@ -83,6 +103,12 @@ onMounted(() => {
 
 .header-box {
   padding: 24px 32px;
+}
+
+.header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .title {

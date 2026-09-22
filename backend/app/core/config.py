@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     )
 
     # AI Configuration
-    AI_MODE: str = os.getenv("AI_MODE", "mock")  # 'mock' or 'real'
+    # 'real' 表示优先调用真实 LLM；未配置 LLM_API_KEY 或调用失败时自动回退 mock
+    AI_MODE: str = os.getenv("AI_MODE", "real")
     LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -31,6 +32,13 @@ class Settings(BaseSettings):
         "UPLOAD_DIR",
         os.path.abspath(os.path.join(os.path.dirname(__file__), '../../uploads')).replace('\\', '/')
     )
+
+    # SMTP (用于找回密码等邮件通知；未配置时回退为开发模式，重置令牌直接返回)
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "465"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "")
 
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = ["*"]

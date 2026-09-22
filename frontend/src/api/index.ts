@@ -8,6 +8,9 @@ export const authApi = {
   registerPersonal: (data: any) => client.post('/auth/register/personal', data),
   registerEnterprise: (data: any) => client.post('/auth/register/enterprise', data),
   updateOnboarding: (data: any) => client.put('/personal/onboarding', data),
+  changePassword: (data: any) => client.post('/auth/change-password', data),
+  forgotPassword: (email: string) => client.post('/auth/forgot-password', { email }),
+  resetPassword: (data: any) => client.post('/auth/reset-password', data),
 }
 
 export const publicApi = {
@@ -33,6 +36,8 @@ export const resumeApi = {
   deleteResume: (id: number) => client.delete(`/resumes/${id}`),
   parseResume: (id: number) => client.post(`/resumes/${id}/parse`),
   optimizeResume: (id: number) => client.post(`/resumes/${id}/optimize`),
+  applyOptimization: (id: number) => client.post(`/resumes/${id}/optimize/apply`),
+  uploadFile: (formData: FormData) => client.post('/files/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
 }
 
 export const applicationApi = {
@@ -51,12 +56,15 @@ export const personalApi = {
   getCompetencies: () => client.get('/personal/competencies'),
   getGrowth: (period?: string) => client.get('/personal/growth', { params: { period } }),
   getLearningPlan: () => client.get('/learning/plans/current'),
-  regenerateLearningPlan: () => client.post('/learning/plans/generate'),
+  regenerateLearningPlan: (data?: any) => client.post('/learning/plans/generate', data || {}),
   completeTask: (id: number) => client.post(`/learning/tasks/${id}/complete`),
   getProfile: () => client.get('/personal/profile'),
   updateProfile: (data: any) => client.patch('/personal/profile', data),
   getNotifications: () => client.get('/notifications'),
   markNotificationRead: (id: number) => client.patch(`/notifications/${id}/read`),
+  markAllNotificationsRead: () => client.post('/notifications/read-all'),
+  getNotificationPreferences: () => client.get('/notifications/preferences'),
+  updateNotificationPreferences: (data: any) => client.patch('/notifications/preferences', data),
   getConsents: () => client.get('/consents'),
   revokeConsent: (id: number) => client.delete(`/consents/${id}`),
   getSessions: () => client.get('/security/sessions'),

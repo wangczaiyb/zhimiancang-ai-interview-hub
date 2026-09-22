@@ -1,4 +1,5 @@
 from typing import Generator, Optional, List
+from datetime import datetime
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -6,7 +7,7 @@ from app.core.database import get_db
 from app.core.security import decode_token
 from app.models.user import User, UserRole
 from app.models.company import CompanyMember
-from app.models.system import OperationLog
+from app.models.system import OperationLog, UserSession
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
@@ -39,6 +40,20 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="账号已被禁用或处于限制状态"
         )
+
+    # 校验会话是否被强制下线（仅对携带 jti 的新令牌生效，向后兼容旧令牌）
+    jti = payload.get("jti")
+    if jti:
+        session = db.query(UserSession).filter(UserSession.jti == jti).first()
+        if session and session.revoked_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="会话已被强制下线，请重新登录"
+            )
+        if session:
+            session.last_active_at = datetime.utcnow()
+            db.commit()
+
     return user
 
 def require_auth(current_user: Optional[User] = Depends(get_current_user)) -> User:

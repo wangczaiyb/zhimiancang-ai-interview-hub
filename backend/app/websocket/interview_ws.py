@@ -8,8 +8,10 @@ from app.models.interview import (
     Interview, InterviewQuestion, InterviewAnswer, AnswerEvaluation, InterviewReport
 )
 from app.models.profile import CompetencyHistory, UserCompetency
-from app.models.learning import LearningPlan, LearningTask
+from app.models.user import User
 from app.ai.provider import ai_provider
+from app.api.v1.interviews import load_interview_context
+from app.api.v1.personal import generate_and_store_learning_plan, resolve_target_job
 
 logger = logging.getLogger("websocket")
 
@@ -45,6 +47,9 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
             }))
             await websocket.close()
             return
+
+        # 加载 JD 与简历上下文（与 REST 通道保持一致）
+        jd_text, resume_context = load_interview_context(interview, db)
 
         # Send connected event
         await manager.send_json(interview_id, {
@@ -122,8 +127,12 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                     "tip": "回答条理清晰，建议在后半段加入具体高并发指标佐证"
                 })
 
-                # Evaluate answer
-                eval_res = await ai_provider.evaluate_answer(q_obj.text, answer_text, q_obj.seq)
+                # Evaluate answer (JD + resume aware)
+                eval_res = await ai_provider.evaluate_answer(
+                    q_obj.text, answer_text, q_obj.seq,
+                    jd_text=jd_text or None,
+                    resume_context=resume_context or None
+                )
 
                 # Save answer evaluation
                 evaluation = AnswerEvaluation(
@@ -146,10 +155,24 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                     interview.status = "COMPLETED"
                     db.commit()
 
-                    # Generate report
+                    # Generate report (transcript-aware)
                     all_evals = db.query(AnswerEvaluation).filter(AnswerEvaluation.interview_id == interview_id).all()
                     scores = [e.total_score for e in all_evals] or [eval_res["score"]]
-                    report_data = await ai_provider.generate_report(interview_id, interview.total_questions, scores)
+                    job_title = interview.job.title if interview.job else "Java后端开发工程师"
+                    qa_pairs = []
+                    for q in sorted(interview.questions, key=lambda x: x.seq):
+                        if q.answer and q.answer.evaluation:
+                            qa_pairs.append({
+                                "seq": q.seq,
+                                "question": q.text,
+                                "answer": q.answer.text,
+                                "score": q.answer.evaluation.total_score
+                            })
+                    report_data = await ai_provider.generate_report(
+                        interview_id, interview.total_questions, scores,
+                        qa_pairs=qa_pairs or None,
+                        job_title=job_title
+                    )
 
                     rep = InterviewReport(
                         interview_id=interview_id,
@@ -190,34 +213,15 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                         )
                         db.add(u_comp)
 
-                    # Auto generate learning tasks
-                    active_plan = db.query(LearningPlan).filter(
-                        LearningPlan.user_id == interview.user_id,
-                        LearningPlan.status == "ACTIVE"
-                    ).first()
-                    if not active_plan:
-                        active_plan = LearningPlan(
-                            user_id=interview.user_id,
-                            target_job_title="Java后端开发工程师",
-                            status="ACTIVE"
-                        )
-                        db.add(active_plan)
-                        db.commit()
-                        db.refresh(active_plan)
-
-                    new_tasks = await ai_provider.generate_learning_plan("Java后端开发工程师")
-                    for t in new_tasks:
-                        task_obj = LearningTask(
-                            plan_id=active_plan.id,
-                            user_id=interview.user_id,
-                            title=t["title"],
-                            competency_name=t.get("competency_name", "Redis"),
-                            priority=t.get("priority", "HIGH"),
-                            reason=t.get("reason", "针对面试薄弱项提升"),
-                            action_type=t.get("action_type", "INTERVIEW_PRACTICE")
-                        )
-                        db.add(task_obj)
-
+                    # Auto generate staged learning tasks based on target job (from user's career preference)
+                    user = db.query(User).filter(User.id == interview.user_id).first()
+                    target_job_title = resolve_target_job(user) if user else job_title
+                    await generate_and_store_learning_plan(
+                        db, user, target_job_title,
+                        jd_text=jd_text or None,
+                        gaps=report_data.get("weaknesses"),
+                        replace=True
+                    )
                     db.commit()
 
                     await manager.send_json(interview_id, {
@@ -238,12 +242,17 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                     ).first()
 
                     if not next_q:
-                        # Dynamic generate
+                        # Dynamic generate (JD + resume aware)
+                        job_title = interview.job.title if interview.job else "Java后端开发工程师"
                         q_data = await ai_provider.generate_question(
-                            job_title="Java开发工程师",
+                            job_title=job_title,
                             seq=next_seq,
+                            difficulty=interview.difficulty,
                             last_question=q_obj.text,
-                            last_answer=answer_text
+                            last_answer=answer_text,
+                            last_score=eval_res.get("score") if eval_res else None,
+                            jd_text=jd_text or None,
+                            resume_context=resume_context or None
                         )
                         next_q = InterviewQuestion(
                             interview_id=interview_id,

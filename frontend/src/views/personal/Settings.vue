@@ -153,7 +153,7 @@
             <el-switch v-model="notifySettings.report" />
           </div>
           <el-divider />
-          <el-button type="primary" @click="handleSaveNotify">保存通知偏好</el-button>
+          <el-button type="primary" :loading="notifyLoading" @click="handleSaveNotify">保存通知偏好</el-button>
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -163,7 +163,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { Monitor } from '@element-plus/icons-vue'
-import { personalApi } from '@/api'
+import { personalApi, authApi } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const activeTab = ref('security')
@@ -202,13 +202,16 @@ const handleUpdatePassword = async () => {
     if (!valid) return
     pwdLoading.value = true
     try {
-      await personalApi.updateProfile({ password: pwdForm.newPassword })
+      await authApi.changePassword({
+        old_password: pwdForm.oldPassword,
+        new_password: pwdForm.newPassword
+      })
       ElMessage.success('密码更新成功，下次登录请使用新密码')
       pwdForm.oldPassword = ''
       pwdForm.newPassword = ''
       pwdForm.confirmPassword = ''
     } catch (err: any) {
-      ElMessage.error(err.response?.data?.detail || '密码更新失败')
+      ElMessage.error(err.response?.data?.message || err.response?.data?.detail || '密码更新失败')
     } finally {
       pwdLoading.value = false
     }
@@ -288,14 +291,36 @@ const handleRevokeSession = (sessionId: string) => {
 }
 
 // 通知偏好
+const notifyLoading = ref(false)
 const notifySettings = reactive({
   interview: true,
   application: true,
   report: true
 })
 
-const handleSaveNotify = () => {
-  ElMessage.success('通知设置已保存')
+const fetchNotifyPrefs = async () => {
+  try {
+    const res: any = await personalApi.getNotificationPreferences()
+    if (res) {
+      notifySettings.interview = !!res.interview
+      notifySettings.application = !!res.application
+      notifySettings.report = !!res.report
+    }
+  } catch (e) {
+    // 使用默认值
+  }
+}
+
+const handleSaveNotify = async () => {
+  notifyLoading.value = true
+  try {
+    await personalApi.updateNotificationPreferences({ ...notifySettings })
+    ElMessage.success('通知设置已保存')
+  } catch (e) {
+    // handled
+  } finally {
+    notifyLoading.value = false
+  }
 }
 
 const formatDate = (val: string) => {
@@ -306,6 +331,7 @@ const formatDate = (val: string) => {
 onMounted(() => {
   fetchConsents()
   fetchSessions()
+  fetchNotifyPrefs()
 })
 </script>
 

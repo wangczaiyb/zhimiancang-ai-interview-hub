@@ -17,6 +17,30 @@ class Notification(Base):
 
     user = relationship("User", back_populates="notifications")
 
+class NotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    interview = Column(Boolean, default=True, nullable=False)    # 面试邀请通知
+    application = Column(Boolean, default=True, nullable=False)  # 申请状态变更
+    report = Column(Boolean, default=True, nullable=False)       # AI 评测报告生成
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    jti = Column(String(64), unique=True, index=True, nullable=False)
+    device = Column(String(100), default="浏览器", nullable=False)
+    ip = Column(String(50), default="127.0.0.1", nullable=False)
+    location = Column(String(50), default="局域网", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_active_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+
 class FileRecord(Base):
     __tablename__ = "files"
 

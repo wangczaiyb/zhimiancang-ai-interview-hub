@@ -11,6 +11,8 @@ class Interview(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=True)
     application_id = Column(Integer, ForeignKey("applications.id"), nullable=True)
+    resume_id = Column(Integer, ForeignKey("resumes.id"), nullable=True)
+    jd_text = Column(Text, nullable=True)  # 本次面试使用的岗位 JD 文本快照
     type = Column(String(50), default="PERSONAL_TRAINING", nullable=False) # PERSONAL_TRAINING, ENTERPRISE_RECRUITMENT
     mode = Column(String(50), default="COMPREHENSIVE", nullable=False)     # COMPREHENSIVE, TECHNICAL, PROJECT_DEEP_DIVE, BEHAVIORAL, STRESS
     difficulty = Column(String(50), default="MEDIUM", nullable=False)      # EASY, MEDIUM, HARD

@@ -23,6 +23,7 @@ class LearningTask(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(String(150), nullable=False)
     competency_name = Column(String(100), default="Redis", nullable=False)
+    stage = Column(String(100), default="第一阶段 · 基础夯实", nullable=False)  # 分阶段学习路线
     priority = Column(String(50), default="HIGH", nullable=False) # HIGH, MEDIUM, LOW
     status = Column(String(50), default="TODO", nullable=False)   # TODO, COMPLETED, SKIPPED
     progress = Column(Integer, default=0, nullable=False)         # 0-100%

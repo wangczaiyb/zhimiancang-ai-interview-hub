@@ -100,9 +100,11 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { personalApi } from '@/api'
+import { useAuthStore } from '@/stores/auth'
 import StateContainer from '@/components/StateContainer.vue'
 import { ElMessage } from 'element-plus'
 
+const authStore = useAuthStore()
 const loading = ref(true)
 const error = ref(false)
 const saving = ref(false)
@@ -125,6 +127,8 @@ const handleSave = async () => {
   saving.value = true
   try {
     await personalApi.updateProfile(profile.value)
+    // 同步刷新登录用户缓存，保证顶部导航与工作台左侧的目标岗位/姓名即时对齐
+    await authStore.fetchCurrentUser()
     ElMessage.success('个人资料与求职偏好已成功更新！')
   } catch (e) {
     // handled

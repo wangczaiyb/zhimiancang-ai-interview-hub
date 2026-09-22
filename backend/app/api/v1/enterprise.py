@@ -15,6 +15,7 @@ from app.models.interview import (
     Interview, InterviewInvitation, RecruiterEvaluation, InterviewReport
 )
 from app.models.system import Notification, OperationLog
+from app.websocket.notification_ws import manager
 from app.schemas.common import ResponseModel, PaginatedData
 from app.schemas.job import JobCreate, JobUpdate, JobOut, SkillRequirement, CompetencyWeight, JobJDParseRequest, JobJDParseResponse
 from app.schemas.application import ApplicationOut, ApplicationAdvanceRequest, StatusHistoryItem
@@ -576,6 +577,7 @@ def advance_candidate(
     db.add(noti)
 
     db.commit()
+    manager.publish(app.user_id, {"type": "new_notification"})
     log_operation(db, member.user_id, member.user.email, member.role_code, "ADVANCE_CANDIDATE", "APPLICATION", app.id, f"候选人推进：{old_status} -> {req.to_status}")
 
     return ResponseModel(data={"message": f"候选人阶段已成功更新至 {req.to_status}"})
@@ -717,6 +719,7 @@ def send_interview_invitation(
     db.add(noti)
 
     db.commit()
+    manager.publish(app.user_id, {"type": "new_notification"})
     return ResponseModel(data={"invitation_id": invitation.id, "message": "面试邀请已发送至候选人个人中心"})
 
 @router.post("/enterprise/interviews/{id}/evaluation", response_model=ResponseModel[dict])

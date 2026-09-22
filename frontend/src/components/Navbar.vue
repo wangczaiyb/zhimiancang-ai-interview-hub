@@ -48,9 +48,10 @@
         <div v-else class="user-session">
           <!-- Notification Bell -->
           <router-link v-if="authStore.isPersonal" to="/personal/notifications" class="noti-bell">
-            <el-badge is-dot class="badge-item">
+            <el-badge v-if="hasUnread" is-dot class="badge-item">
               <el-icon :size="20"><Bell /></el-icon>
             </el-badge>
+            <el-icon v-else :size="20"><Bell /></el-icon>
           </router-link>
 
           <!-- User Dropdown -->
@@ -124,9 +125,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { personalApi } from '@/api'
 import {
   Monitor, Search, Bell, ArrowDown, Odometer, Suitcase, Document,
   Files, VideoCamera, TrendCharts, User, OfficeBuilding, Briefcase,
@@ -136,6 +138,49 @@ import {
 const router = useRouter()
 const authStore = useAuthStore()
 const searchKey = ref('')
+const hasUnread = ref(false)
+
+// 仅当存在未读消息时才显示红点，避免常态红点误导
+const loadUnreadStatus = async () => {
+  if (!authStore.isPersonal) return
+  try {
+    const res: any = await personalApi.getNotifications()
+    hasUnread.value = Array.isArray(res) && res.some((n: any) => !n.read)
+  } catch (e) {
+    hasUnread.value = false
+  }
+}
+
+// 连接通知 WebSocket，收到新通知时实时刷新红点
+let notiWs: WebSocket | null = null
+const connectNotificationWS = () => {
+  const userId = authStore.user?.id
+  if (!authStore.isPersonal || !userId || notiWs) return
+  try {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    notiWs = new WebSocket(`${proto}://${location.host}/ws/notifications/${userId}`)
+    notiWs.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data)
+        if (data.type === 'new_notification' || data.type === 'connected') {
+          loadUnreadStatus()
+        }
+      } catch (e) { /* ignore */ }
+    }
+    notiWs.onerror = () => { notiWs?.close(); notiWs = null }
+    notiWs.onclose = () => { notiWs = null }
+  } catch (e) { /* ignore */ }
+}
+
+onMounted(() => {
+  loadUnreadStatus()
+  connectNotificationWS()
+})
+
+onUnmounted(() => {
+  notiWs?.close()
+  notiWs = null
+})
 
 const userInitial = computed(() => {
   return authStore.user?.name ? authStore.user.name.charAt(0).toUpperCase() : 'U'

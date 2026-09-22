@@ -33,6 +33,8 @@ class ResumeCreate(BaseModel):
     name: str = "我的个人简历"
     target_job_title: str = "Java后端开发工程师"
     is_default: bool = False
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
     educations: List[EducationItem] = []
     projects: List[ProjectItem] = []
     work_experiences: List[WorkExperienceItem] = []
@@ -72,3 +74,7 @@ class ResumeAIOptimizeResult(BaseModel):
     improvements: List[str]
     suggested_modifications: List[dict]
     keyword_enrichment: List[str]
+
+class ResumeOptimizeApplyResult(BaseModel):
+    resume: ResumeOut
+    changes: List[str] = []

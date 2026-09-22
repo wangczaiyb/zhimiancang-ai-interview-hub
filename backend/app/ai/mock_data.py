@@ -385,8 +385,17 @@ def generate_mock_report(interview_id: int, total_questions: int, scores: List[f
 def generate_mock_learning_tasks() -> List[Dict[str, Any]]:
     return [
         {
+            "title": "夯实 Java 并发与 JVM 底层基础",
+            "competency_name": "Java",
+            "stage": "第一阶段 · 基础夯实",
+            "priority": "HIGH",
+            "reason": "面试高频考察 JMM、锁机制与 GC 调优，是岗位 JD 的核心要求",
+            "action_type": "READING"
+        },
+        {
             "title": "精读 Redis 分布式锁与 Redisson 源码实现",
             "competency_name": "Redis",
+            "stage": "第一阶段 · 基础夯实",
             "priority": "HIGH",
             "reason": "在面试中针对缓存击穿与分布式锁细节仍有提升空间",
             "action_type": "INTERVIEW_PRACTICE"
@@ -394,15 +403,33 @@ def generate_mock_learning_tasks() -> List[Dict[str, Any]]:
         {
             "title": "MySQL 深入调优：慢查询日志排查与执行计划全解",
             "competency_name": "MySQL",
+            "stage": "第二阶段 · 专项强化",
             "priority": "HIGH",
             "reason": "岗位要求熟练掌握 B+ 树索引覆盖与聚集索引调优",
             "action_type": "INTERVIEW_PRACTICE"
         },
         {
+            "title": "完成 1 次 Redis/MySQL 专项模拟面试并复盘",
+            "competency_name": "综合表达",
+            "stage": "第二阶段 · 专项强化",
+            "priority": "MEDIUM",
+            "reason": "通过定向模拟检验专项强化成果，形成可量化的提升证据",
+            "action_type": "INTERVIEW_PRACTICE"
+        },
+        {
             "title": "分布式系统高可用设计：发号器与防重幂等设计演练",
             "competency_name": "系统设计",
+            "stage": "第三阶段 · 架构进阶",
             "priority": "MEDIUM",
             "reason": "强化面对架构深挖题的结构化设计与表达输出",
+            "action_type": "PROJECT"
+        },
+        {
+            "title": "高并发系统设计模拟面试冲刺",
+            "competency_name": "系统设计",
+            "stage": "第三阶段 · 架构进阶",
+            "priority": "MEDIUM",
+            "reason": "综合检验架构进阶成果，冲刺目标岗位终面",
             "action_type": "INTERVIEW_PRACTICE"
         }
     ]

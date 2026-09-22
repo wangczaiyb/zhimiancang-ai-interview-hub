@@ -49,6 +49,7 @@ export interface ResumeItem {
   name: string
   is_default: boolean
   file_url?: string
+  file_name?: string
   target_job_title: string
   completeness: number
   created_at: string

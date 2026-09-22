@@ -11,6 +11,7 @@ class InterviewCreate(BaseModel):
     difficulty: str = "MEDIUM"      # EASY, MEDIUM, HARD
     total_questions: int = 5
     duration_minutes: int = 30
+    jd_text: Optional[str] = None   # 用户输入的/自动带出的岗位 JD 文本
 
 class InterviewQuestionOut(BaseModel):
     id: int

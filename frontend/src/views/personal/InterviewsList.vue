@@ -58,7 +58,7 @@
               <router-link v-if="row.status === 'COMPLETED'" :to="`/personal/interviews/${row.id}/report`">
                 <el-button link type="primary">查看复盘报告 →</el-button>
               </router-link>
-              <router-link v-else :to="`/personal/interviews/${row.id}/session`">
+              <router-link v-else :to="`/personal/interviews/${row.id}/room`">
                 <el-button link type="warning">继续作答 →</el-button>
               </router-link>
             </template>

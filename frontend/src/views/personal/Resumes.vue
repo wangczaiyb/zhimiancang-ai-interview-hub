@@ -11,7 +11,9 @@
             action="/api/v1/files/upload"
             :show-file-list="false"
             :on-success="handleUploadSuccess"
+            :on-error="handleUploadError"
             :before-upload="beforeUpload"
+            accept=".pdf,.docx,.doc"
             name="file"
             :headers="uploadHeaders"
           >
@@ -46,6 +48,10 @@
               <span class="lbl">更新时间：</span>
               <span class="val">{{ resume.created_at ? resume.created_at.substring(0, 10) : '' }}</span>
             </div>
+            <div v-if="resume.file_name" class="meta-row">
+              <span class="lbl">上传文件：</span>
+              <span class="val file-name-link" @click="openPreview(resume)">{{ resume.file_name }} ↗</span>
+            </div>
 
             <!-- Content preview -->
             <div class="resume-stats-chips">
@@ -64,10 +70,21 @@
               <el-button size="small" type="warning" plain>AI 智能诊断</el-button>
             </router-link>
 
+            <el-button
+              size="small"
+              type="success"
+              plain
+              :loading="optimizingId === resume.id"
+              @click="handleOptimize(resume)"
+            >
+              AI 一键优化
+            </el-button>
+
             <el-dropdown trigger="click" @command="(cmd: string) => handleMenu(cmd, resume)">
               <el-button size="small">更多操作 ▾</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
+                  <el-dropdown-item v-if="resume.file_url" command="preview">查看上传文档</el-dropdown-item>
                   <el-dropdown-item v-if="!resume.is_default" command="set_default">设为默认投递</el-dropdown-item>
                   <el-dropdown-item command="ai_parse">重新触发 AI 解析</el-dropdown-item>
                   <el-dropdown-item divided command="delete" style="color: #EF4444;">删除简历</el-dropdown-item>
@@ -78,6 +95,23 @@
         </div>
       </div>
     </StateContainer>
+
+    <!-- 上传文档在线预览 -->
+    <el-dialog v-model="previewVisible" :title="previewTitle" width="900px" top="5vh">
+      <div class="preview-body">
+        <iframe
+          v-if="previewUrl"
+          :src="previewUrl"
+          class="preview-frame"
+          title="简历文档预览"
+        />
+        <el-empty v-else description="暂无可预览的文档" />
+      </div>
+      <template #footer>
+        <el-button @click="previewVisible = false">关闭</el-button>
+        <el-button type="primary" @click="openPreviewInNewTab">在新窗口打开</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -96,6 +130,12 @@ const authStore = useAuthStore()
 
 const loading = ref(true)
 const resumes = ref<ResumeItem[]>([])
+const optimizingId = ref<number | null>(null)
+
+// 文档预览
+const previewVisible = ref(false)
+const previewUrl = ref('')
+const previewTitle = ref('')
 
 const uploadHeaders = computed(() => {
   return {
@@ -124,18 +164,93 @@ const beforeUpload = (file: File) => {
   return true
 }
 
-const handleUploadSuccess = async () => {
-  ElMessage.success('简历上传成功，AI 正在结构化解析并入库...')
-  // Trigger parse on new resume
-  const newRes = await resumeApi.createResume({
-    name: '最新上传个人简历 (AI解析)',
-    target_job_title: 'Java后端开发工程师',
-    is_default: false,
-    educations: [{ school: '北京航空航天大学', major: '软件工程', degree: '本科', start_date: '2020-09', end_date: '2024-06' }],
-    projects: [{ name: '高并发秒杀与微服务架构', role: '核心开发', description: '基于 Spring Boot + Redis 支撑高并发秒杀与限流', technologies: 'Java, Redis, MySQL', start_date: '2023-09', end_date: '2023-12' }],
-    skills: [{ skill_name: 'Java', level: '熟练' }, { skill_name: 'Redis', level: '熟练' }, { skill_name: 'MySQL', level: '熟练' }]
-  })
-  loadResumes()
+const openPreview = (resume: ResumeItem) => {
+  if (!resume.file_url) {
+    ElMessage.warning('该简历暂无上传文档')
+    return
+  }
+  previewUrl.value = resume.file_url
+  previewTitle.value = resume.file_name || resume.name
+  previewVisible.value = true
+}
+
+const openPreviewInNewTab = () => {
+  if (previewUrl.value) {
+    window.open(previewUrl.value, '_blank')
+  }
+}
+
+const handleUploadError = () => {
+  ElMessage.error('简历上传失败，请确认文件格式为 PDF/DOCX 且不超过 10MB')
+}
+
+const handleUploadSuccess = async (response: any) => {
+  // 后端统一响应结构：{ code, message, data: { file_id, file_url, file_name, size } }
+  const data = response?.data || {}
+  const fileUrl: string = data.file_url || ''
+  const fileName: string = data.file_name || '最新上传简历'
+
+  if (!fileUrl) {
+    ElMessage.error('上传失败：未获取到文件地址')
+    return
+  }
+
+  loading.value = true
+  try {
+    // 以真实上传文件创建简历记录（结构化字段留空，由 AI 解析填充）
+    const res: any = await resumeApi.createResume({
+      name: fileName.replace(/\.[^.]+$/, '') || '最新上传个人简历',
+      target_job_title: 'Java后端开发工程师',
+      is_default: resumes.value.length === 0,
+      file_url: fileUrl,
+      file_name: fileName,
+      educations: [],
+      projects: [],
+      work_experiences: [],
+      skills: []
+    })
+
+    // 触发 AI 结构化解析（读取真实文件文本；解析结果会回填结构化经历）
+    try {
+      await resumeApi.parseResume(res.id)
+    } catch (e) {
+      // 解析失败不阻断上传，用户可稍后手动重试
+    }
+
+    ElMessage.success('简历上传成功，已生成在线文档预览并完成 AI 结构化解析')
+    await loadResumes()
+
+    // 上传后直接展示可打开的文档预览
+    previewUrl.value = fileUrl
+    previewTitle.value = fileName
+    previewVisible.value = true
+  } catch (e) {
+    // handled
+  } finally {
+    loading.value = false
+  }
+}
+
+const handleOptimize = async (resume: ResumeItem) => {
+  optimizingId.value = resume.id
+  try {
+    const res: any = await resumeApi.applyOptimization(resume.id)
+    const changes: string[] = res?.changes || []
+    if (!changes.length) {
+      ElMessage.warning('AI 未返回可应用的改写内容，请确认已配置 LLM 服务后重试')
+      return
+    }
+    ElMessageBox.alert(
+      `<div style="line-height:1.8;font-size:13px;">${changes.map(c => `· ${c}`).join('<br/>')}</div>`,
+      'AI 优化完成',
+      { dangerouslyUseHTMLString: true, confirmButtonText: '知道了' }
+    )
+    loadResumes()
+  } catch (e) {
+    // handled
+  } finally {
+    optimizingId.value = null
+  }
 }
 
 const createNewResume = async () => {
@@ -152,7 +267,9 @@ const createNewResume = async () => {
 }
 
 const handleMenu = async (cmd: string, resume: ResumeItem) => {
-  if (cmd === 'set_default') {
+  if (cmd === 'preview') {
+    openPreview(resume)
+  } else if (cmd === 'set_default') {
     await resumeApi.updateResume(resume.id, {
       ...resume,
       is_default: true
@@ -292,6 +409,26 @@ onMounted(() => {
   gap: 10px;
   border-top: 1px solid var(--zh-border-light);
   padding-top: 16px;
+  flex-wrap: wrap;
+}
+
+.file-name-link {
+  color: #2563EB;
+  cursor: pointer;
+  font-weight: 500;
+}
+.file-name-link:hover {
+  text-decoration: underline;
+}
+
+.preview-body {
+  height: 68vh;
+}
+.preview-frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--zh-border-light);
+  border-radius: 8px;
 }
 
 @media (max-width: 900px) {

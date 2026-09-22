@@ -4,21 +4,106 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.core.deps import require_auth, log_operation
+from app.core.deps import require_auth, log_operation, oauth2_scheme
+from app.core.security import decode_token
 from app.models.user import User
 from app.models.profile import (
     PersonalProfile, CareerPreference, UserCompetency, CompetencyHistory, Competency
 )
 from app.models.resume import Resume
-from app.models.job import Job, JobFavorite
+from app.models.job import Job, JobFavorite, JobCompetency
 from app.models.application import Application
 from app.models.interview import Interview, InterviewReport
 from app.models.learning import LearningPlan, LearningTask
-from app.models.system import Notification, ConsentRecord
+from app.models.system import Notification, NotificationPreference, ConsentRecord, UserSession
 from app.schemas.common import ResponseModel
 from app.ai.provider import ai_provider
 
 router = APIRouter(tags=["个人求职与成长中心"])
+
+
+def resolve_target_job(user: User, jd_text: Optional[str] = None) -> str:
+    """优先取用户求职意向中的目标岗位，其次回退默认岗位。"""
+    pref = user.career_preference
+    if pref and pref.target_job_title:
+        return pref.target_job_title
+    return "Java后端开发工程师"
+
+
+def get_candidate_skills(user: User, db: Session) -> List[str]:
+    """取候选人技能：优先默认简历的技能，其次能力图谱；都没有则返回空列表。"""
+    resume = db.query(Resume).filter(
+        Resume.user_id == user.id,
+        Resume.is_deleted == False
+    ).order_by(Resume.is_default.desc(), Resume.id.desc()).first()
+    if resume and resume.skills:
+        return [s.skill_name for s in resume.skills]
+    comps = db.query(UserCompetency).filter(UserCompetency.user_id == user.id).all()
+    if comps:
+        return [c.competency_name for c in comps]
+    return []
+
+
+def calc_match_score(candidate_skills: List[str], required_skills: List[str]):
+    """确定性技能匹配分（与 explain_job_match 的口径一致），返回 (score, reason)。"""
+    required = [r for r in (required_skills or []) if r]
+    if not required:
+        return 60, "岗位暂未标注技能要求，请查看详情"
+    c_set = {s.lower() for s in candidate_skills}
+    adv = [s for s in required if s.lower() in c_set]
+    missing = [s for s in required if s.lower() not in c_set]
+    score = min(98, max(60, int(60 + len(adv) * 8 - len(missing) * 4)))
+    if adv:
+        reason = f"匹配技能 {len(adv)} 项：{'、'.join(adv[:3])}" + (" 等" if len(adv) > 3 else "")
+    else:
+        reason = "暂未匹配到岗位技能，建议完善简历技能标签"
+    return score, reason
+
+
+def get_or_create_active_plan(db: Session, user: User, target_job_title: str) -> LearningPlan:
+    plan = db.query(LearningPlan).filter(
+        LearningPlan.user_id == user.id,
+        LearningPlan.status == "ACTIVE"
+    ).first()
+    if not plan:
+        plan = LearningPlan(user_id=user.id, target_job_title=target_job_title, status="ACTIVE")
+        db.add(plan)
+        db.commit()
+        db.refresh(plan)
+    elif target_job_title:
+        plan.target_job_title = target_job_title
+    return plan
+
+
+async def generate_and_store_learning_plan(
+    db: Session,
+    user: User,
+    target_job_title: str,
+    jd_text: Optional[str] = None,
+    gaps: Optional[List[str]] = None,
+    replace: bool = False
+) -> LearningPlan:
+    """调用 AI 生成学习任务并按阶段落库，供学习路线页分阶段展示。"""
+    plan = get_or_create_active_plan(db, user, target_job_title)
+    if replace:
+        db.query(LearningTask).filter(LearningTask.plan_id == plan.id).delete()
+        db.commit()
+
+    tasks = await ai_provider.generate_learning_plan(target_job_title, gaps=gaps, jd_text=jd_text)
+    for idx, t in enumerate(tasks):
+        db.add(LearningTask(
+            plan_id=plan.id,
+            user_id=user.id,
+            title=t["title"],
+            competency_name=t.get("competency_name", "综合能力"),
+            stage=t.get("stage") or f"第{idx + 1}阶段 · 专项提升",
+            priority=t.get("priority", "HIGH"),
+            reason=t.get("reason", "针对目标岗位 JD 与薄弱项量身定制"),
+            action_type=t.get("action_type", "INTERVIEW_PRACTICE")
+        ))
+    db.commit()
+    db.refresh(plan)
+    return plan
 
 @router.get("/personal/dashboard", response_model=ResponseModel[dict])
 def get_personal_dashboard(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
@@ -82,6 +167,7 @@ def get_personal_dashboard(current_user: User = Depends(require_auth), db: Sessi
 
     # Recommended jobs
     rec_jobs = db.query(Job).filter(Job.status == "PUBLISHED").limit(3).all()
+    candidate_skills = get_candidate_skills(current_user, db)
     rec_jobs_data = []
     for r in rec_jobs:
         rec_jobs_data.append({
@@ -91,7 +177,7 @@ def get_personal_dashboard(current_user: User = Depends(require_auth), db: Sessi
             "city": r.city,
             "salary_min": r.salary_min,
             "salary_max": r.salary_max,
-            "match_score": 92
+            "match_score": calc_match_score(candidate_skills, [s.skill_name for s in r.skills])[0]
         })
 
     # Dynamic Growth Chart from user's actual InterviewReport
@@ -153,8 +239,10 @@ def get_personal_dashboard(current_user: User = Depends(require_auth), db: Sessi
 @router.get("/personal/jobs/recommended", response_model=ResponseModel[List[dict]])
 def get_recommended_jobs(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
     jobs = db.query(Job).filter(Job.status == "PUBLISHED").limit(10).all()
+    candidate_skills = get_candidate_skills(current_user, db)
     res = []
     for j in jobs:
+        match_score, match_reason = calc_match_score(candidate_skills, [s.skill_name for s in j.skills])
         res.append({
             "id": j.id,
             "title": j.title,
@@ -165,8 +253,8 @@ def get_recommended_jobs(current_user: User = Depends(require_auth), db: Session
             "salary_max": j.salary_max,
             "education": j.education,
             "experience": j.experience,
-            "match_score": 90,
-            "match_reason": "核心技术栈高度重合（Java、Spring Boot、MySQL、Redis）",
+            "match_score": match_score,
+            "match_reason": match_reason,
             "skills": [s.skill_name for s in j.skills]
         })
     return ResponseModel(data=res)
@@ -178,23 +266,86 @@ async def get_job_match(jobId: int, current_user: User = Depends(require_auth), 
         raise HTTPException(status_code=404, detail="岗位不存在")
 
     req_skills = [s.skill_name for s in job.skills]
-    user_skills = ["Java", "Spring Boot", "MySQL", "Redis", "计算机网络"]
-    explanation = await ai_provider.explain_job_match(job.title, user_skills, req_skills)
+    candidate_skills = get_candidate_skills(current_user, db)
+    explanation = await ai_provider.explain_job_match(job.title, candidate_skills, req_skills)
     return ResponseModel(data=explanation)
 
 @router.get("/personal/assessment", response_model=ResponseModel[dict])
 def get_assessment(job_id: Optional[int] = None, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
-    # Radar & breakdown table
-    competencies = [
-        {"name": "Java基础与并发", "current_score": 85, "required_score": 80, "gap": 0, "weight": 25, "evidence": "简历项目及模拟面试表现良好"},
-        {"name": "Redis缓存架构", "current_score": 76, "required_score": 85, "gap": 9, "weight": 25, "evidence": "面试中对缓存击穿回答稍简略"},
-        {"name": "MySQL数据库调优", "current_score": 80, "required_score": 80, "gap": 0, "weight": 20, "evidence": "掌握B+树与索引覆盖"},
-        {"name": "分布式微服务", "current_score": 72, "required_score": 80, "gap": 8, "weight": 15, "evidence": "缺乏千万级分布式链路实战经验"},
-        {"name": "沟通表达与逻辑", "current_score": 86, "required_score": 75, "gap": 0, "weight": 10, "evidence": "语言组织流畅有条理"},
-        {"name": "工程实践与调优", "current_score": 74, "required_score": 80, "gap": 6, "weight": 5, "evidence": "建议补充真实线上故障排查细节"}
-    ]
+    """能力诊断：岗位要求能力(JobCompetency) × 用户当前能力(最新一次 InterviewReport)，真实计算差距。
 
-    # Sort priority by gap * weight
+    数据来源：
+      - required_score / weight：目标岗位的 JobCompetency（专业基础/项目经验/系统设计/沟通表达/综合素质）
+      - current_score：用户最近一次模拟面试报告的 dimension_scores（维度名与 JobCompetency 一致）
+      - 无面试记录时，以用户能力分(UserCompetency)均值作为兜底，并注明证据缺失
+    """
+    # 1. 定位目标岗位
+    job = None
+    if job_id:
+        job = db.query(Job).filter(Job.id == job_id).first()
+    pref = current_user.career_preference
+    if not job and pref:
+        if pref.target_job_id:
+            job = db.query(Job).filter(Job.id == pref.target_job_id, Job.status == "PUBLISHED").first()
+        if not job and pref.target_job_title:
+            job = db.query(Job).filter(Job.title == pref.target_job_title, Job.status == "PUBLISHED").first()
+
+    target_job_title = job.title if job else (pref.target_job_title if pref else "Java后端开发工程师")
+
+    # 2. 岗位要求能力（weight + required_score）
+    required_map: dict = {}
+    if job:
+        for jc in job.competencies:
+            required_map[jc.competency_name] = (jc.weight or 0.0, jc.required_score or 0.0)
+
+    # 3. 用户当前能力（最近一次面试报告的维度分）
+    current_map: dict = {}
+    latest_report = db.query(InterviewReport).filter(
+        InterviewReport.user_id == current_user.id
+    ).order_by(InterviewReport.id.desc()).first()
+    if latest_report and latest_report.dimension_scores_json:
+        try:
+            current_map = json.loads(latest_report.dimension_scores_json)
+        except Exception:
+            current_map = {}
+
+    # 4. 兜底用户能力均值（无面试记录时使用）
+    user_comps = db.query(UserCompetency).filter(UserCompetency.user_id == current_user.id).all()
+    fallback_score = round(sum(c.score for c in user_comps) / len(user_comps), 1) if user_comps else 60.0
+
+    # 5. 组装维度（岗位要求维度为主，合并报告维度）
+    dimensions = list(required_map.keys()) or ["专业基础", "项目经验", "系统设计", "沟通表达", "综合素质"]
+    for d in current_map.keys():
+        if d not in dimensions:
+            dimensions.append(d)
+
+    competencies = []
+    total_weight = 0.0
+    for name in dimensions:
+        weight, required = required_map.get(name, (0.0, 0.0))
+        current = current_map.get(name)
+        if current is None:
+            current = fallback_score
+        if not required:
+            required = 80.0
+        if not weight:
+            weight = round(100.0 / len(dimensions), 1)
+        total_weight += weight
+        gap = max(0.0, round(required - current, 1))
+        competencies.append({
+            "name": name,
+            "current_score": round(current, 1),
+            "required_score": round(required, 1),
+            "gap": gap,
+            "weight": weight,
+            "evidence": "来源：最近一次模拟面试报告" if latest_report else "暂无面试记录，建议先完成一次模拟面试以获取能力诊断"
+        })
+
+    # 6. 综合契合指数（按权重加权）
+    overall_score = round(
+        sum(c["current_score"] * c["weight"] for c in competencies) / total_weight, 1
+    ) if total_weight else round(fallback_score, 1)
+
     priorities = sorted(
         [c for c in competencies if c["gap"] > 0],
         key=lambda x: x["gap"] * x["weight"],
@@ -202,8 +353,8 @@ def get_assessment(job_id: Optional[int] = None, current_user: User = Depends(re
     )
 
     return ResponseModel(data={
-        "target_job": "Java后端开发工程师",
-        "overall_score": 79.5,
+        "target_job": target_job_title,
+        "overall_score": overall_score,
         "radar": {
             "indicators": [{"name": c["name"], "max": 100} for c in competencies],
             "current_values": [c["current_score"] for c in competencies],
@@ -326,6 +477,7 @@ def get_growth_center(period: str = "30d", current_user: User = Depends(require_
 
 @router.get("/learning/plans/current", response_model=ResponseModel[dict])
 def get_current_learning_plan(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    target_job_title = resolve_target_job(current_user)
     plan = db.query(LearningPlan).filter(
         LearningPlan.user_id == current_user.id,
         LearningPlan.status == "ACTIVE"
@@ -333,12 +485,13 @@ def get_current_learning_plan(current_user: User = Depends(require_auth), db: Se
 
     tasks_out = []
     if plan:
-        tasks = db.query(LearningTask).filter(LearningTask.plan_id == plan.id).all()
+        tasks = db.query(LearningTask).filter(LearningTask.plan_id == plan.id).order_by(LearningTask.id.asc()).all()
         tasks_out = [
             {
                 "id": t.id,
                 "title": t.title,
                 "competency_name": t.competency_name,
+                "stage": t.stage or "第一阶段 · 基础夯实",
                 "priority": t.priority,
                 "status": t.status,
                 "progress": t.progress,
@@ -350,43 +503,56 @@ def get_current_learning_plan(current_user: User = Depends(require_auth), db: Se
 
     if not tasks_out:
         tasks_out = [
-            {"id": 1, "title": "精读 Redis 分布式锁与 Redisson 源码实现", "competency_name": "Redis", "priority": "HIGH", "status": "TODO", "progress": 0, "reason": "面试中针对缓存击穿与分布式锁细节仍有提升空间", "action_type": "INTERVIEW_PRACTICE"},
-            {"id": 2, "title": "MySQL 深入调优：慢查询日志排查与执行计划全解", "competency_name": "MySQL", "priority": "HIGH", "status": "COMPLETED", "progress": 100, "reason": "岗位要求熟练掌握 B+ 树索引覆盖与聚集索引调优", "action_type": "INTERVIEW_PRACTICE"},
-            {"id": 3, "title": "分布式系统高可用设计：发号器与防重幂等设计演练", "competency_name": "系统设计", "priority": "MEDIUM", "status": "TODO", "progress": 40, "reason": "强化面对架构深挖题的结构化设计与表达输出", "action_type": "INTERVIEW_PRACTICE"}
+            {"id": 1, "title": "夯实 Java 并发与 JVM 底层基础", "competency_name": "Java", "stage": "第一阶段 · 基础夯实", "priority": "HIGH", "status": "TODO", "progress": 0, "reason": "面试高频考察 JMM、锁机制与 GC 调优", "action_type": "READING"},
+            {"id": 2, "title": "精读 Redis 分布式锁与 Redisson 源码实现", "competency_name": "Redis", "stage": "第一阶段 · 基础夯实", "priority": "HIGH", "status": "COMPLETED", "progress": 100, "reason": "面试中针对缓存击穿与分布式锁细节仍有提升空间", "action_type": "INTERVIEW_PRACTICE"},
+            {"id": 3, "title": "MySQL 深入调优：慢查询日志排查与执行计划全解", "competency_name": "MySQL", "stage": "第二阶段 · 专项强化", "priority": "HIGH", "status": "TODO", "progress": 40, "reason": "岗位要求熟练掌握 B+ 树索引覆盖与聚集索引调优", "action_type": "INTERVIEW_PRACTICE"},
+            {"id": 4, "title": "分布式系统高可用设计：发号器与防重幂等设计演练", "competency_name": "系统设计", "stage": "第三阶段 · 架构进阶", "priority": "MEDIUM", "status": "TODO", "progress": 0, "reason": "强化面对架构深挖题的结构化设计与表达输出", "action_type": "PROJECT"}
         ]
+
+    # 按阶段聚合，便于前端分阶段展示待办
+    stages_map: dict = {}
+    for t in tasks_out:
+        stages_map.setdefault(t["stage"], []).append(t)
+    stages_out = [
+        {
+            "stage": stage,
+            "tasks": stage_tasks,
+            "total": len(stage_tasks),
+            "completed": sum(1 for x in stage_tasks if x["status"] == "COMPLETED")
+        }
+        for stage, stage_tasks in stages_map.items()
+    ]
 
     return ResponseModel(data={
         "id": plan.id if plan else 1,
-        "target_job_title": plan.target_job_title if plan else "Java后端开发工程师",
-        "tasks": tasks_out
+        "target_job_title": plan.target_job_title if plan else target_job_title,
+        "tasks": tasks_out,
+        "stages": stages_out
     })
 
 @router.post("/learning/plans/generate", response_model=ResponseModel[dict])
-async def regenerate_learning_plan(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
-    new_tasks = await ai_provider.generate_learning_plan("Java后端开发工程师")
-    plan = db.query(LearningPlan).filter(
-        LearningPlan.user_id == current_user.id,
-        LearningPlan.status == "ACTIVE"
-    ).first()
-    if not plan:
-        plan = LearningPlan(user_id=current_user.id, target_job_title="Java后端开发工程师", status="ACTIVE")
-        db.add(plan)
-        db.commit()
-        db.refresh(plan)
+async def regenerate_learning_plan(data: dict = None, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    # 依据用户求职意向中的目标岗位（可由前端传入 JD 覆盖）自动生成分阶段学习路线
+    jd_text = (data or {}).get("jd_text")
+    target_job_title = resolve_target_job(current_user, jd_text)
+    gaps = (data or {}).get("gaps")
 
-    for t in new_tasks:
-        task_obj = LearningTask(
-            plan_id=plan.id,
-            user_id=current_user.id,
-            title=t["title"],
-            competency_name=t.get("competency_name", "Redis"),
-            priority=t.get("priority", "HIGH"),
-            reason=t.get("reason", "针对最新模拟面试薄弱项量身定制"),
-            action_type=t.get("action_type", "INTERVIEW_PRACTICE")
-        )
-        db.add(task_obj)
-    db.commit()
-    return ResponseModel(data={"message": "学习路线与任务已重新生成"})
+    # 依据最近一次面试的薄弱项补充定向任务依据
+    if not gaps:
+        recent_report = db.query(InterviewReport).filter(
+            InterviewReport.user_id == current_user.id
+        ).order_by(InterviewReport.id.desc()).first()
+        if recent_report and recent_report.weaknesses_json:
+            try:
+                gaps = json.loads(recent_report.weaknesses_json)[:3]
+            except Exception:
+                gaps = None
+
+    await generate_and_store_learning_plan(
+        db, current_user, target_job_title,
+        jd_text=jd_text, gaps=gaps, replace=True
+    )
+    return ResponseModel(data={"message": "学习路线与任务已重新生成", "target_job_title": target_job_title})
 
 @router.post("/learning/tasks/{id}/complete", response_model=ResponseModel[dict])
 def complete_learning_task(id: int, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
@@ -481,6 +647,15 @@ def mark_notification_read(id: int, current_user: User = Depends(require_auth), 
         db.commit()
     return ResponseModel(data={"message": "已标记为已读"})
 
+@router.post("/notifications/read-all", response_model=ResponseModel[dict])
+def mark_all_notifications_read(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    db.query(Notification).filter(
+        Notification.user_id == current_user.id,
+        Notification.read_at.is_(None)
+    ).update({"read_at": datetime.utcnow()})
+    db.commit()
+    return ResponseModel(data={"message": "全部消息已标记为已读"})
+
 @router.get("/consents", response_model=ResponseModel[List[dict]])
 def list_consents(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
     consents = db.query(ConsentRecord).filter(ConsentRecord.user_id == current_user.id).all()
@@ -505,14 +680,71 @@ def revoke_consent(id: int, current_user: User = Depends(require_auth), db: Sess
         log_operation(db, current_user.id, current_user.email, "PERSONAL", "REVOKE_CONSENT", "CONSENT", consent.id, "撤销企业数据查看授权")
     return ResponseModel(data={"message": "授权已撤销"})
 
+@router.get("/notifications/preferences", response_model=ResponseModel[dict])
+def get_notification_preferences(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
+    if not pref:
+        return ResponseModel(data={"interview": True, "application": True, "report": True})
+    return ResponseModel(data={
+        "interview": pref.interview,
+        "application": pref.application,
+        "report": pref.report
+    })
+
+@router.patch("/notifications/preferences", response_model=ResponseModel[dict])
+def update_notification_preferences(data: dict, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    pref = db.query(NotificationPreference).filter(NotificationPreference.user_id == current_user.id).first()
+    if not pref:
+        pref = NotificationPreference(user_id=current_user.id)
+        db.add(pref)
+    for field in ["interview", "application", "report"]:
+        if field in data:
+            setattr(pref, field, bool(data[field]))
+    db.commit()
+    return ResponseModel(data={"message": "通知偏好已更新"})
+
 @router.get("/security/sessions", response_model=ResponseModel[List[dict]])
-def list_sessions(current_user: User = Depends(require_auth)):
+def list_sessions(current_user: User = Depends(require_auth), db: Session = Depends(get_db), token: Optional[str] = Depends(oauth2_scheme)):
+    payload = decode_token(token) if token else None
+    current_jti = payload.get("jti") if payload else None
+
+    sessions = db.query(UserSession).filter(
+        UserSession.user_id == current_user.id,
+        UserSession.revoked_at.is_(None)
+    ).order_by(UserSession.last_active_at.desc()).all()
+
+    if not sessions:
+        # 旧 token（无 jti）未落库时，返回当前会话的兜底项
+        return ResponseModel(data=[{
+            "id": current_jti or "current",
+            "device": "当前浏览器",
+            "ip": "127.0.0.1",
+            "location": "本机",
+            "is_current": True,
+            "last_active": "刚刚"
+        }])
+
     return ResponseModel(data=[
-        {"id": "sess-current", "device": "Windows Chrome 124.0", "ip": "127.0.0.1", "is_current": True, "last_active": "刚刚"},
-        {"id": "sess-mobile", "device": "iPhone 15 Pro Safari", "ip": "114.242.12.8", "is_current": False, "last_active": "2天前"}
+        {
+            "id": s.jti,
+            "device": s.device,
+            "ip": s.ip,
+            "location": s.location,
+            "is_current": s.jti == current_jti,
+            "last_active": s.last_active_at.strftime("%Y-%m-%d %H:%M") if s.last_active_at else "刚刚"
+        }
+        for s in sessions
     ])
 
 @router.delete("/security/sessions/{id}", response_model=ResponseModel[dict])
 def revoke_session(id: str, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
-    log_operation(db, current_user.id, current_user.email, "PERSONAL", "REVOKE_SESSION", "SESSION", 0, f"强制下线设备：{id}")
-    return ResponseModel(data={"message": "该设备会话已强制下线"})
+    session = db.query(UserSession).filter(
+        UserSession.jti == id,
+        UserSession.user_id == current_user.id
+    ).first()
+    if session:
+        session.revoked_at = datetime.utcnow()
+        db.commit()
+        log_operation(db, current_user.id, current_user.email, "PERSONAL", "REVOKE_SESSION", "SESSION", session.id, f"强制下线设备：{session.device} ({session.ip})")
+        return ResponseModel(data={"message": "该设备会话已强制下线"})
+    return ResponseModel(data={"message": "会话不存在或已下线"})

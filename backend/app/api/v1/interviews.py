@@ -11,8 +11,8 @@ from app.models.interview import (
     Interview, InterviewPlan, InterviewQuestion, InterviewAnswer,
     AnswerEvaluation, InterviewReport
 )
+from app.models.resume import Resume
 from app.models.profile import CompetencyHistory, UserCompetency
-from app.models.learning import LearningPlan, LearningTask
 from app.schemas.common import ResponseModel
 from app.schemas.interview import (
     InterviewCreate, InterviewOut, InterviewQuestionOut,
@@ -21,6 +21,51 @@ from app.schemas.interview import (
 from app.ai.provider import ai_provider
 
 router = APIRouter(tags=["AI 模拟面试与复盘"])
+
+def build_jd_text(job: Job = None, override: str = None) -> str:
+    """优先使用用户输入/自动带出的 JD 文本，否则回退到岗位自身的 JD 字段。"""
+    if override and override.strip():
+        return override.strip()
+    if not job:
+        return ""
+    parts = [
+        f"岗位名称：{job.title}",
+        f"学历要求：{job.education}｜经验要求：{job.experience}｜工作城市：{job.city}",
+    ]
+    if job.skills:
+        parts.append("技能要求：" + "、".join(s.skill_name for s in job.skills))
+    if job.description:
+        parts.append(f"岗位描述：{job.description}")
+    if job.duties:
+        parts.append(f"岗位职责：{job.duties}")
+    if job.requirements:
+        parts.append(f"任职要求：{job.requirements}")
+    if job.bonus:
+        parts.append(f"加分项：{job.bonus}")
+    return "\n".join(parts)
+
+
+def build_resume_context(resume: Resume = None) -> str:
+    """将结构化简历序列化为供 AI 使用的文本上下文。"""
+    if not resume:
+        return ""
+    lines = [f"姓名：{resume.name}｜目标岗位：{resume.target_job_title}"]
+    for e in resume.educations:
+        lines.append(f"教育：{e.school} {e.major} {e.degree}（{e.start_date}~{e.end_date}）")
+    for w in resume.work_experiences:
+        lines.append(f"工作：{w.company} - {w.title}（{w.start_date}~{w.end_date}）：{w.description}")
+    for p in resume.projects:
+        lines.append(f"项目：{p.name}（{p.role}，{p.technologies}）：{p.description}")
+    if resume.skills:
+        lines.append("技能：" + "、".join(f"{s.skill_name}({s.level})" for s in resume.skills))
+    return "\n".join(lines)
+
+
+def load_interview_context(interview: Interview, db: Session):
+    """加载一次面试的 JD 与简历上下文（用于出题与评分）。"""
+    job = db.query(Job).filter(Job.id == interview.job_id).first() if interview.job_id else None
+    resume = db.query(Resume).filter(Resume.id == interview.resume_id).first() if interview.resume_id else None
+    return build_jd_text(job, interview.jd_text), build_resume_context(resume)
 
 def build_interview_out(interview: Interview) -> InterviewOut:
     q_outs = []
@@ -81,16 +126,36 @@ def build_interview_out(interview: Interview) -> InterviewOut:
 @router.post("/interviews", response_model=ResponseModel[InterviewOut])
 async def create_interview(req: InterviewCreate, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
     job_title = "Java后端开发工程师"
+    job = None
     if req.job_id:
         job = db.query(Job).filter(Job.id == req.job_id).first()
         if job:
             job_title = job.title
+
+    # 若未显式传入 JD 文本，则从所选岗位自动带出
+    jd_text = build_jd_text(job, req.jd_text)
+
+    # 加载用户选择的简历（用于个性化出题）
+    resume = None
+    if req.resume_id:
+        resume = db.query(Resume).filter(
+            Resume.id == req.resume_id,
+            Resume.user_id == current_user.id
+        ).first()
+    if not resume:
+        resume = db.query(Resume).filter(
+            Resume.user_id == current_user.id,
+            Resume.is_deleted == False
+        ).order_by(Resume.is_default.desc(), Resume.id.desc()).first()
+    resume_context = build_resume_context(resume)
 
     # Create interview record
     interview = Interview(
         user_id=current_user.id,
         company_id=None,
         job_id=req.job_id,
+        resume_id=resume.id if resume else None,
+        jd_text=jd_text or None,
         application_id=req.application_id,
         type=req.type,
         mode=req.mode,
@@ -120,8 +185,14 @@ async def create_interview(req: InterviewCreate, current_user: User = Depends(re
     )
     db.add(plan)
 
-    # Generate Question 1
-    q1_data = await ai_provider.generate_question(job_title=job_title, seq=1)
+    # Generate Question 1 based on JD + resume
+    q1_data = await ai_provider.generate_question(
+        job_title=job_title,
+        seq=1,
+        difficulty=req.difficulty,
+        jd_text=jd_text,
+        resume_context=resume_context
+    )
     q1 = InterviewQuestion(
         interview_id=interview.id,
         seq=1,
@@ -242,8 +313,13 @@ async def answer_interview_question(id: int, req: InterviewAnswerRequest, curren
         answer.text = req.text
         db.commit()
 
-    # AI Evaluation using Rubric
-    eval_res = await ai_provider.evaluate_answer(curr_q.text, req.text, curr_q.seq)
+    # AI Evaluation using Rubric (JD + resume aware)
+    jd_text, resume_context = load_interview_context(interview, db)
+    eval_res = await ai_provider.evaluate_answer(
+        curr_q.text, req.text, curr_q.seq,
+        jd_text=jd_text or None,
+        resume_context=resume_context or None
+    )
 
     # Save evaluation
     eval_obj = db.query(AnswerEvaluation).filter(AnswerEvaluation.answer_id == answer.id).first()
@@ -283,9 +359,12 @@ async def answer_interview_question(id: int, req: InterviewAnswerRequest, curren
             q_data = await ai_provider.generate_question(
                 job_title=job_title,
                 seq=next_seq,
+                difficulty=interview.difficulty,
                 last_question=curr_q.text,
                 last_answer=req.text,
-                last_score=eval_res["score"]
+                last_score=eval_res["score"],
+                jd_text=jd_text or None,
+                resume_context=resume_context or None
             )
             next_q = InterviewQuestion(
                 interview_id=id,
@@ -334,7 +413,23 @@ async def finish_interview(id: int, current_user: User = Depends(require_auth), 
     # Generate report
     all_evals = db.query(AnswerEvaluation).filter(AnswerEvaluation.interview_id == id).all()
     scores = [e.total_score for e in all_evals] if all_evals else [82.0]
-    report_data = await ai_provider.generate_report(id, interview.total_questions, scores)
+
+    job_title = interview.job.title if interview.job else "Java后端开发工程师"
+    jd_text, resume_context = load_interview_context(interview, db)
+    qa_pairs = []
+    for q in sorted(interview.questions, key=lambda x: x.seq):
+        if q.answer and q.answer.evaluation:
+            qa_pairs.append({
+                "seq": q.seq,
+                "question": q.text,
+                "answer": q.answer.text,
+                "score": q.answer.evaluation.total_score
+            })
+    report_data = await ai_provider.generate_report(
+        id, interview.total_questions, scores,
+        qa_pairs=qa_pairs or None,
+        job_title=job_title
+    )
 
     rep = db.query(InterviewReport).filter(InterviewReport.interview_id == id).first()
     if not rep:
@@ -377,26 +472,15 @@ async def finish_interview(id: int, current_user: User = Depends(require_auth), 
         u_comp = UserCompetency(user_id=current_user.id, competency_name="Redis", score=report_data["total_score"])
         db.add(u_comp)
 
-    # Generate learning tasks
-    active_plan = db.query(LearningPlan).filter(LearningPlan.user_id == current_user.id, LearningPlan.status == "ACTIVE").first()
-    if not active_plan:
-        active_plan = LearningPlan(user_id=current_user.id, target_job_title="Java后端开发工程师", status="ACTIVE")
-        db.add(active_plan)
-        db.commit()
-        db.refresh(active_plan)
-
-    new_tasks = await ai_provider.generate_learning_plan("Java后端开发工程师")
-    for t in new_tasks:
-        task_obj = LearningTask(
-            plan_id=active_plan.id,
-            user_id=current_user.id,
-            title=t["title"],
-            competency_name=t.get("competency_name", "Redis"),
-            priority=t.get("priority", "HIGH"),
-            reason=t.get("reason", "针对面试薄弱项提升"),
-            action_type=t.get("action_type", "INTERVIEW_PRACTICE")
-        )
-        db.add(task_obj)
+    # Generate staged learning tasks based on target job (from user's career preference)
+    from app.api.v1.personal import generate_and_store_learning_plan, resolve_target_job
+    target_job_title = resolve_target_job(current_user)
+    await generate_and_store_learning_plan(
+        db, current_user, target_job_title,
+        jd_text=jd_text or None,
+        gaps=report_data.get("weaknesses"),
+        replace=True
+    )
 
     db.commit()
     log_operation(db, current_user.id, current_user.email, "PERSONAL", "FINISH_INTERVIEW", "INTERVIEW", id, f"完成模拟面试，得分：{report_data['total_score']}")

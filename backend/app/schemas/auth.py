@@ -1,5 +1,5 @@
 from typing import Optional, List
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 class LoginRequest(BaseModel):
     account: str  # email or phone
@@ -18,6 +18,7 @@ class TokenResponse(BaseModel):
     company_id: Optional[int] = None
 
 class RegisterPersonalRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=50, description="用户真实姓名")
     phone: Optional[str] = None
     email: EmailStr
     password: str
@@ -46,6 +47,17 @@ class OnboardingRequest(BaseModel):
     salary_min: int = 15
     salary_max: int = 25
     job_status: str = "LOOKING"
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
 
 class UserInfoOut(BaseModel):
     id: int

@@ -8,6 +8,7 @@ from app.models.user import User
 from app.models.application import Application, ApplicationStatusHistory, CandidateTag
 from app.models.interview import InterviewInvitation, Interview
 from app.models.system import Notification
+from app.websocket.notification_ws import manager
 from app.schemas.common import ResponseModel
 from app.schemas.application import (
     ApplicationOut, ApplicationWithdrawRequest, StatusHistoryItem
@@ -136,6 +137,9 @@ def withdraw_application(
             db.add(noti)
 
     db.commit()
+    if app.job and app.job.company:
+        for m in app.job.company.members:
+            manager.publish(m.user_id, {"type": "new_notification"})
     log_operation(db, current_user.id, current_user.email, "PERSONAL", "WITHDRAW_APPLICATION", "APPLICATION", app.id, f"撤回岗位【{app.job.title if app.job else ''}】申请")
 
     return ResponseModel(data={"message": "投递已成功撤回"})

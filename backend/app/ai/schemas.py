@@ -58,3 +58,17 @@ class MatchExplainerSchema(BaseModel):
     advantage_skills: List[str]
     missing_skills: List[str]
     explanation: str
+
+class ResumeOptimizeSchema(BaseModel):
+    completeness_score: int = Field(..., ge=0, le=100)
+    strengths: List[str]
+    improvements: List[str]
+    suggested_modifications: List[Dict[str, Any]]
+    keyword_enrichment: List[str]
+
+class ResumeRewriteSchema(BaseModel):
+    """AI 一键优化：改写后的结构化简历内容"""
+    projects: List[Dict[str, Any]] = []
+    skills: List[Dict[str, Any]] = []
+    work_experience: List[Dict[str, Any]] = []
+    changes: List[str] = []
