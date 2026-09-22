@@ -12,16 +12,47 @@ class InterviewCreate(BaseModel):
     total_questions: int = 5
     duration_minutes: int = 30
     jd_text: Optional[str] = None   # 用户输入的/自动带出的岗位 JD 文本
+    use_question_bank: bool = True  # 是否优先从结构化题库组卷（关闭则全部 AI 实时生成）
+    selected_bank_ids: Optional[List[int]] = None  # 按已预览确认的考卷出题（题库题目 ID，按顺序）
 
 class InterviewQuestionOut(BaseModel):
     id: int
     seq: int
     stage: str
+    question_type: str = "PROFESSIONAL"  # PROFESSIONAL / GENERAL / STRESS
     skill_name: str
     text: str
     difficulty: str
+    hints: Optional[str] = None
+    time_limit_sec: int = 180
+    source: str = "QUESTION_BANK"        # QUESTION_BANK / AI_GENERATED
+    reference_points: List[str] = []     # 参考答案要点（仅复盘阶段下发）
+    reveal_reference: bool = False       # 是否允许展示参考答案（作答中为 False）
     user_answer: Optional[str] = None
     evaluation: Optional[Dict[str, Any]] = None
+
+class PaperPreviewItem(BaseModel):
+    seq: int
+    bank_id: Optional[int] = None      # 题库题目 ID，回传可按此考卷开考
+    question_type: str
+    skill_name: str
+    stage: str
+    difficulty: str
+    text: str
+    time_limit_sec: int
+    source: str
+
+class PaperPreviewOut(BaseModel):
+    mode: str
+    total_questions: int
+    ratio: Dict[str, int]          # 题型配比（专业/通用/压力）
+    allocated: Dict[str, int]      # 分配到的各题型题数
+    from_bank: int                 # 题库命中题数
+    missing_for_ai: Dict[str, int] = {}  # 题库缺口（将由 AI 补足）
+    matched_category: str
+    job_skills: List[str] = []
+    bank_available: int
+    questions: List[PaperPreviewItem] = []
 
 class InterviewOut(BaseModel):
     id: int

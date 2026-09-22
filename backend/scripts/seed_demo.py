@@ -956,6 +956,15 @@ def seed(reset=True):
         ))
     db.commit()
 
+    print("16. Seeding Structured Question Bank (题库组卷引擎数据源)...")
+    # 题库独立于业务数据：reset 不清空，采用幂等 upsert，避免误删人工维护的题目
+    try:
+        from scripts.seed_question_bank import seed_question_bank
+    except ImportError:
+        from seed_question_bank import seed_question_bank
+    qb_stat = seed_question_bank(db)
+    print(f"    题库就绪：新增 {qb_stat['inserted']}，更新 {qb_stat['updated']}，总量 {qb_stat['total']}")
+
     print("=================================================================")
     print("智面舱 AI Interview Hub V2 完整仿真业务数据装载成功！")
     print("=================================================================")

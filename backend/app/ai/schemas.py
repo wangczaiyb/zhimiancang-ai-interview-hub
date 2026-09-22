@@ -31,6 +31,9 @@ class QuestionGenSchema(BaseModel):
     stage: str
     difficulty: str
     hints: Optional[str] = None
+    # 题型与逐题限时：与结构化题库字段对齐，使 AI 补足题也能参与统计与倒计时
+    question_type: Optional[str] = "PROFESSIONAL"  # PROFESSIONAL / GENERAL / STRESS
+    time_limit_sec: Optional[int] = 180
 
 class AnswerEvalSchema(BaseModel):
     score: float = Field(..., ge=0, le=100)

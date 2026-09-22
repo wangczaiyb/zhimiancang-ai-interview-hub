@@ -37,6 +37,16 @@ def ensure_schema() -> None:
         "learning_tasks": {
             "stage": "VARCHAR(100)",
         },
+        "interview_plans": {
+            "paper_json": "TEXT",
+        },
+        "interview_questions": {
+            "bank_id": "INTEGER",
+            "question_type": "VARCHAR(20)",
+            "reference_points_json": "TEXT",
+            "hints": "VARCHAR(255)",
+            "time_limit_sec": "INTEGER",
+        },
     }
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
@@ -48,3 +58,15 @@ def ensure_schema() -> None:
             for col_name, col_type in columns.items():
                 if col_name not in current:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
+                    current.add(col_name)
+
+            # 旧数据补默认值：新增列在 SQLite 中为 NULL，需回填以保持查询语义一致
+            defaults = {
+                "interview_questions": {
+                    "question_type": "PROFESSIONAL",
+                    "time_limit_sec": 180,
+                },
+            }.get(table, {})
+            for col_name, default_val in defaults.items():
+                literal = default_val if isinstance(default_val, int) else f"'{default_val}'"
+                conn.execute(text(f"UPDATE {table} SET {col_name} = {literal} WHERE {col_name} IS NULL"))

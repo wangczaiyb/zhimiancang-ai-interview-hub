@@ -41,6 +41,8 @@ class InterviewPlan(Base):
     stages_json = Column(Text, nullable=False)
     total_questions = Column(Integer, default=5, nullable=False)
     duration_minutes = Column(Integer, default=30, nullable=False)
+    # 组卷快照：题型配比、抽题来源、题库缺口与 AI 补足情况，保证卷面可追溯可复现
+    paper_json = Column(Text, nullable=True)
 
     interview = relationship("Interview", back_populates="plan")
 
@@ -50,13 +52,20 @@ class InterviewQuestion(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     interview_id = Column(Integer, ForeignKey("interviews.id"), nullable=False)
     parent_question_id = Column(Integer, nullable=True)
+    bank_id = Column(Integer, nullable=True)  # 来源题库题目 ID（AI 动态生成的题为空）
     seq = Column(Integer, nullable=False)
     stage = Column(String(50), default="专业基础", nullable=False)
+    # PROFESSIONAL 专业题 / GENERAL 通用题 / STRESS 压力题
+    question_type = Column(String(20), default="PROFESSIONAL", nullable=False)
     skill_id = Column(Integer, nullable=True)
     skill_name = Column(String(100), default="Java", nullable=False)
     text = Column(Text, nullable=False)
     difficulty = Column(String(50), default="MEDIUM", nullable=False)
-    source = Column(String(50), default="AI_GENERATED", nullable=False)
+    # 参考答案要点（JSON 数组），逐题复盘时与候选人作答对照
+    reference_points_json = Column(Text, nullable=True)
+    hints = Column(String(255), nullable=True)  # 临场答题提示
+    time_limit_sec = Column(Integer, default=180, nullable=False)  # 逐题建议限时
+    source = Column(String(50), default="QUESTION_BANK", nullable=False)  # QUESTION_BANK, AI_GENERATED
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     interview = relationship("Interview", back_populates="questions")

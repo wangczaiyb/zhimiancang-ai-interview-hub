@@ -15,6 +15,7 @@ from app.models.interview import (
     AnswerEvaluation, InterviewReport, InterviewInvitation, RecruiterEvaluation
 )
 from app.models.learning import LearningPlan, LearningTask
+from app.models.question import QuestionBank
 from app.models.system import (
     Notification, FileRecord, ConsentRecord, Complaint, OperationLog, AICallLog
 )

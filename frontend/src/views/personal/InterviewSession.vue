@@ -8,6 +8,9 @@
             <span class="room-job-badge">{{ session.job_title }}</span>
             <span class="room-seq-indicator">第 {{ session.current_question_seq }} / {{ session.total_questions }} 题</span>
             <span class="room-stage-pill">{{ currentStage }}</span>
+            <span :class="['room-qtype-pill', qtypeClass(currentQuestion?.question_type)]">
+              {{ qtypeLabel(currentQuestion?.question_type) }}
+            </span>
           </div>
 
           <div class="top-center-progress">
@@ -21,6 +24,10 @@
           </div>
 
           <div class="top-right-meta">
+            <div :class="['room-timer-pill', 'question-timer', { 'timer-overtime': questionOverTime }]">
+              <el-icon><Stopwatch /></el-icon>
+              <span>本题用时 <strong>{{ formatTime(questionElapsed) }}</strong> / {{ questionLimitText }}</span>
+            </div>
             <div class="room-timer-pill">
               <el-icon><Clock /></el-icon>
               <span>剩余时间 <strong>{{ formatTime(remainingSeconds) }}</strong></span>
@@ -56,18 +63,21 @@
             <!-- Current Big Question Text -->
             <div class="current-question-container">
               <div class="q-skill-badge-row">
-                <span class="q-skill-tag">考察技能：{{ currentQuestion?.skill_name || 'Redis / 高并发' }}</span>
+                <span class="q-skill-tag">考察技能：{{ currentQuestion?.skill_name || '综合技术能力' }}</span>
                 <span class="q-diff-tag">{{ currentQuestion?.difficulty || 'MEDIUM' }}</span>
+                <span class="q-source-tag">
+                  {{ currentQuestion?.source === 'QUESTION_BANK' ? '题库精选' : 'AI 实时出题' }}
+                </span>
               </div>
               <h1 class="question-headline">
-                {{ currentQuestion?.text || '在高并发场景下，如何防止 Redis 缓存击穿与雪崩？互斥锁与逻辑过期在实践中如何权衡？' }}
+                {{ currentQuestion?.text || '正在加载题目...' }}
               </h1>
             </div>
 
             <!-- Question Sub-note / Hint -->
-            <div class="question-hint-bar">
+            <div v-if="currentQuestion?.hints" class="question-hint-bar">
               <el-icon color="#93C5FD"><InfoFilled /></el-icon>
-              <span>回答时建议采用 STAR 法则，阐明核心技术底层原理及实际生产压测指标。</span>
+              <span>{{ currentQuestion.hints }}</span>
             </div>
           </section>
 
@@ -230,7 +240,7 @@ import StateContainer from '@/components/StateContainer.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Clock, UserFilled, VideoCamera, Microphone, VideoPause, VideoPlay,
-  RefreshRight, Cpu, Close, InfoFilled
+  RefreshRight, Cpu, Close, InfoFilled, Stopwatch
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -247,6 +257,21 @@ const remainingSeconds = ref(1800)
 const isPaused = ref(false)
 let timer: any = null
 
+/* ---------- 逐题计时（用于限时提示与真实作答用时上报） ---------- */
+const questionElapsed = ref(0)
+const questionLimit = computed(() => currentQuestion.value?.time_limit_sec || 180)
+const questionOverTime = computed(() => questionElapsed.value > questionLimit.value)
+const questionLimitText = computed(() => formatTime(questionLimit.value))
+
+const qtypeLabel = (t?: string) =>
+  ({ PROFESSIONAL: '专业题', GENERAL: '通用题', STRESS: '压力题' }[t || ''] || '综合题')
+const qtypeClass = (t?: string) =>
+  ({ PROFESSIONAL: 'qtype-pro', GENERAL: 'qtype-gen', STRESS: 'qtype-str' }[t || ''] || 'qtype-gen')
+
+const resetQuestionTimer = () => {
+  questionElapsed.value = 0
+}
+
 const micEnabled = ref(true)
 const cameraEnabled = ref(true)
 const videoRef = ref<HTMLVideoElement | null>(null)
@@ -255,7 +280,7 @@ let localStream: MediaStream | null = null
 const showAssist = ref(false) // Default folded per spec
 
 const currentStage = computed(() => {
-  return currentQuestion.value?.stage || '深度探究阶段'
+  return currentQuestion.value?.stage || '综合考察阶段'
 })
 
 const formatTime = (secs: number) => {
@@ -267,9 +292,9 @@ const formatTime = (secs: number) => {
 const startTimer = () => {
   if (timer) clearInterval(timer)
   timer = setInterval(() => {
-    if (!isPaused.value && remainingSeconds.value > 0) {
-      remainingSeconds.value--
-    }
+    if (isPaused.value) return
+    if (remainingSeconds.value > 0) remainingSeconds.value--
+    questionElapsed.value++
   }, 1000)
 }
 
@@ -321,18 +346,23 @@ const loadSession = async () => {
     const res: any = await interviewApi.getInterview(interviewId)
     const data = res?.data || res
     session.value = data
+    // 整场剩余时间按已用时长折算（服务端 started_at 为准，回退按题量估算）
+    remainingSeconds.value = Math.max(
+      60,
+      (data?.duration_minutes || (data?.total_questions || 5) * 5) * 60
+    )
     if (data?.current_question) {
       currentQuestion.value = data.current_question
+    } else if (data?.questions?.length) {
+      // 卷面已预生成，取当前序号对应的题目
+      const seq = data.current_question_seq || 1
+      currentQuestion.value =
+        data.questions.find((q: any) => q.seq === seq) || data.questions[0]
     } else {
-      currentQuestion.value = {
-        id: 1,
-        seq: data.current_question_seq || 7,
-        stage: '专业深度探究阶段',
-        skill_name: 'Redis 缓存',
-        difficulty: 'MEDIUM',
-        text: '在高并发场景下，如何防止 Redis 缓存击穿与雪崩？互斥锁与逻辑过期在实践中如何权衡？'
-      }
+      currentQuestion.value = null
+      ElMessage.warning('本次面试暂无题目，请返回重新创建面试')
     }
+    resetQuestionTimer()
     startTimer()
     initCamera()
   } catch (err: any) {
@@ -347,14 +377,20 @@ const submitCurrentAnswer = async () => {
     ElMessage.warning('回答内容不能为空，请作答')
     return
   }
+  if (!currentQuestion.value?.id) {
+    ElMessage.error('当前题目缺失，请刷新页面重试')
+    return
+  }
 
   evaluating.value = true
   const interviewId = Number(route.params.id)
+  // 上报本题真实作答用时（秒）
+  const spentSec = questionElapsed.value
   try {
     const res: any = await interviewApi.answerQuestion(interviewId, {
-      question_id: currentQuestion.value?.id || 1,
+      question_id: currentQuestion.value.id,
       text: answerText.value,
-      duration_sec: 50
+      duration_sec: spentSec
     })
 
     const data = res?.data || res
@@ -364,15 +400,14 @@ const submitCurrentAnswer = async () => {
       router.push(`/interviews/${interviewId}/report`)
     } else {
       session.value.current_question_seq += 1
-      currentQuestion.value = data.next_question || {
-        id: session.value.current_question_seq,
-        seq: session.value.current_question_seq,
-        stage: '系统设计深度深挖',
-        skill_name: 'MySQL / 分布式',
-        difficulty: 'HARD',
-        text: '如果线上数据库突发慢查询引发连接池耗尽，你的应急排查与索引重构流程是怎样的？'
-      }
+      // 下一题由后端卷面下发（题库预生成或 AI 补足），不再前端兜底假题
+      currentQuestion.value = data.next_question || null
       answerText.value = ''
+      resetQuestionTimer()
+      if (!currentQuestion.value) {
+        ElMessage.warning('未获取到下一题，正在重新加载考卷')
+        await loadSession()
+      }
     }
   } catch (err: any) {
     ElMessage.error(err.message || '提交回答失败')
@@ -462,6 +497,44 @@ onUnmounted(() => {
 .room-stage-pill {
   font-size: 12px;
   color: #9CA3AF;
+}
+
+/* 题型胶囊（专业/通用/压力） */
+.room-qtype-pill {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+}
+
+.qtype-pro {
+  color: #BFDBFE;
+  background: rgba(37, 99, 235, 0.22);
+  border-color: rgba(59, 130, 246, 0.45);
+}
+
+.qtype-gen {
+  color: #A7F3D0;
+  background: rgba(16, 185, 129, 0.18);
+  border-color: rgba(52, 211, 153, 0.4);
+}
+
+.qtype-str {
+  color: #FECACA;
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+/* 逐题计时超时高亮 */
+.question-timer {
+  transition: all 0.2s;
+}
+
+.timer-overtime {
+  color: #FCA5A5;
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(248, 113, 113, 0.45);
 }
 
 .top-center-progress {
@@ -620,6 +693,15 @@ onUnmounted(() => {
   background: rgba(245, 158, 11, 0.15);
   padding: 2px 8px;
   border-radius: 4px;
+}
+
+.q-source-tag {
+  font-size: 11px;
+  color: #93C5FD;
+  background: rgba(59, 130, 246, 0.12);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px dashed rgba(59, 130, 246, 0.35);
 }
 
 .question-headline {

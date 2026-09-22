@@ -84,6 +84,23 @@ export interface ApplicationItem {
   status_history: { id: number; from_status?: string; to_status: string; note?: string; created_at: string }[]
 }
 
+export interface InterviewQuestionView {
+  id: number
+  seq: number
+  stage: string
+  question_type: string          // PROFESSIONAL / GENERAL / STRESS
+  skill_name: string
+  text: string
+  difficulty: string
+  hints?: string
+  time_limit_sec: number
+  source: string                 // QUESTION_BANK / AI_GENERATED
+  reference_points: string[]     // 参考答案要点（仅复盘阶段非空）
+  reveal_reference: boolean
+  user_answer?: string
+  evaluation?: any
+}
+
 export interface InterviewSession {
   id: number
   user_id: number
@@ -97,24 +114,30 @@ export interface InterviewSession {
   current_question_seq: number
   total_questions: number
   duration_minutes: number
+  questions: InterviewQuestionView[]
+  current_question?: InterviewQuestionView
+}
+
+export interface PaperPreview {
+  mode: string
+  total_questions: number
+  ratio: Record<string, number>
+  allocated: Record<string, number>
+  from_bank: number
+  missing_for_ai: Record<string, number>
+  matched_category: string
+  job_skills: string[]
+  bank_available: number
   questions: {
-    id: number
     seq: number
-    stage: string
+    question_type: string
     skill_name: string
-    text: string
+    stage: string
     difficulty: string
-    user_answer?: string
-    evaluation?: any
+    text: string
+    time_limit_sec: number
+    source: string
   }[]
-  current_question?: {
-    id: number
-    seq: number
-    stage: string
-    skill_name: string
-    text: string
-    difficulty: string
-  }
 }
 
 export interface InterviewReportData {
@@ -137,6 +160,12 @@ export interface InterviewReportData {
     question: string
     answer: string
     score: number
+    question_type?: string
+    stage?: string
+    skill_name?: string
+    difficulty?: string
+    source?: string
+    reference_points?: string[]
     evidence: string[]
     weaknesses: string[]
     missing_knowledge: string[]

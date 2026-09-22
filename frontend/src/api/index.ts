@@ -1,5 +1,5 @@
 import client from './client'
-import type { UserInfo, JobItem, ResumeItem, ApplicationItem, InterviewSession, InterviewReportData } from '@/types'
+import type { UserInfo, JobItem, ResumeItem, ApplicationItem, InterviewSession, InterviewReportData, PaperPreview } from '@/types'
 
 export const authApi = {
   login: (data: any) => client.post('/auth/login', data),
@@ -81,6 +81,11 @@ export const interviewApi = {
   answerQuestion: (id: number, data: any) => client.post(`/interviews/${id}/answer`, data),
   finishInterview: (id: number) => client.post(`/interviews/${id}/finish`),
   getReport: (id: number) => client.get<any, InterviewReportData>(`/interviews/${id}/report`),
+  // 结构化题库组卷：配比查询 / 组卷预览 / 题库统计
+  getPaperRatio: (params: { mode: string; total_questions: number }) =>
+    client.get<any, { mode: string; ratio: Record<string, number>; allocated: Record<string, number>; bank_available: number; bank_ready: boolean }>('/interviews/paper-ratio', { params }),
+  previewPaper: (data: any) => client.post<any, PaperPreview>('/interviews/paper-preview', data),
+  getBankStats: () => client.get<any, { total: number; by_type: Record<string, number>; by_category: Record<string, number>; ready: boolean }>('/interviews/bank-stats'),
 }
 
 export const enterpriseApi = {

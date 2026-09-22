@@ -206,6 +206,10 @@
                       <template #title>
                         <div class="collapse-title-row">
                           <span class="q-seq-tag">第 {{ q.seq }} 题</span>
+                          <span v-if="q.question_type" :class="['q-type-tag', qtypeClass(q.question_type)]">
+                            {{ qtypeLabel(q.question_type) }}
+                          </span>
+                          <span v-if="q.skill_name" class="q-skill-mini">{{ q.skill_name }}</span>
                           <span class="q-text-snippet">{{ q.question }}</span>
                           <div class="score-badge-box">
                             <span class="score-num">{{ q.score }}</span>
@@ -222,6 +226,20 @@
                             候选人原回答实录：
                           </div>
                           <p class="box-text">{{ q.answer || '（音频口语作答或未提交长文本）' }}</p>
+                        </div>
+
+                        <!-- Reference Key Points (题库标准答案要点，用于对照补短板) -->
+                        <div v-if="q.reference_points?.length" class="review-box reference-box">
+                          <div class="box-label">
+                            <span class="dot purple-dot"></span>
+                            参考答案要点（可对照自查）：
+                          </div>
+                          <ul class="sub-list">
+                            <li v-for="(rp, idx) in q.reference_points" :key="idx">
+                              <el-icon class="sub-icon"><Right /></el-icon>
+                              <span>{{ rp }}</span>
+                            </li>
+                          </ul>
                         </div>
 
                         <!-- Rubric Evidence -->
@@ -371,7 +389,8 @@ import {
   Document,
   Reading,
   Download,
-  Back
+  Back,
+  Right
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { InterviewReportData } from '@/types'
@@ -382,6 +401,11 @@ const error = ref(false)
 const report = ref<InterviewReportData | null>(null)
 const activeTab = ref('overview')
 const activeQuestions = ref<string[]>(['1', '2'])
+
+const qtypeLabel = (t?: string) =>
+  ({ PROFESSIONAL: '专业题', GENERAL: '通用题', STRESS: '压力题' }[t || ''] || '综合题')
+const qtypeClass = (t?: string) =>
+  ({ PROFESSIONAL: 'qtype-pro', GENERAL: 'qtype-gen', STRESS: 'qtype-str' }[t || ''] || 'qtype-gen')
 
 const radarIndicators = [
   { name: '专业基础', max: 100 },
@@ -806,6 +830,43 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+/* 题型标签（专业/通用/压力） */
+.q-type-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.qtype-pro {
+  color: #1D4ED8;
+  background: #EFF6FF;
+  border-color: #BFDBFE;
+}
+
+.qtype-gen {
+  color: #047857;
+  background: #ECFDF5;
+  border-color: #A7F3D0;
+}
+
+.qtype-str {
+  color: #B91C1C;
+  background: #FEF2F2;
+  border-color: #FECACA;
+}
+
+.q-skill-mini {
+  font-size: 11px;
+  color: #64748B;
+  background: #F1F5F9;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
 .q-text-snippet {
   font-size: 14px;
   font-weight: 600;
@@ -864,10 +925,17 @@ onMounted(() => {
 .green-dot { background: #10B981; }
 .red-dot { background: #EF4444; }
 .amber-dot { background: #F59E0B; }
+.purple-dot { background: #7C3AED; }
 
 .answer-box {
   background: #F8FAFC;
   border: 1px solid var(--zh-border);
+}
+
+.reference-box {
+  background: #F5F3FF;
+  border: 1px solid #DDD6FE;
+  color: #4C1D95;
 }
 
 .box-text {

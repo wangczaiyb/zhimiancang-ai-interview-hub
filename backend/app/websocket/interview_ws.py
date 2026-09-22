@@ -10,7 +10,10 @@ from app.models.interview import (
 from app.models.profile import CompetencyHistory, UserCompetency
 from app.models.user import User
 from app.ai.provider import ai_provider
-from app.api.v1.interviews import load_interview_context
+from app.api.v1.interviews import (
+    load_interview_context, build_question_payload, build_ai_reference_points,
+    next_fallback_question, PROFESSIONAL
+)
 from app.api.v1.personal import generate_and_store_learning_plan, resolve_target_job
 
 logger = logging.getLogger("websocket")
@@ -50,6 +53,8 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
 
         # 加载 JD 与简历上下文（与 REST 通道保持一致）
         jd_text, resume_context = load_interview_context(interview, db)
+        # 仅面试结束后下发参考答案，作答过程中保持闭卷
+        reveal = interview.status in ("COMPLETED", "CANCELLED", "EXPIRED")
 
         # Send connected event
         await manager.send_json(interview_id, {
@@ -67,15 +72,9 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
         ).first()
 
         if current_q:
-            await manager.send_json(interview_id, {
-                "type": "question",
-                "question_id": current_q.id,
-                "text": current_q.text,
-                "seq": current_q.seq,
-                "stage": current_q.stage,
-                "skill_name": current_q.skill_name,
-                "difficulty": current_q.difficulty
-            })
+            payload = build_question_payload(current_q, reveal_reference=reveal)
+            payload["type"] = "question"
+            await manager.send_json(interview_id, payload)
 
         while True:
             data_text = await websocket.receive_text()
@@ -127,11 +126,19 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                     "tip": "回答条理清晰，建议在后半段加入具体高并发指标佐证"
                 })
 
-                # Evaluate answer (JD + resume aware)
+                # Evaluate answer (JD + resume + 题库参考答案 aware，与 REST 通道一致)
+                ws_ref_points = None
+                if q_obj.reference_points_json:
+                    try:
+                        parsed = json.loads(q_obj.reference_points_json)
+                        ws_ref_points = parsed if isinstance(parsed, list) else None
+                    except Exception:
+                        ws_ref_points = None
                 eval_res = await ai_provider.evaluate_answer(
                     q_obj.text, answer_text, q_obj.seq,
                     jd_text=jd_text or None,
-                    resume_context=resume_context or None
+                    resume_context=resume_context or None,
+                    reference_points=ws_ref_points
                 )
 
                 # Save answer evaluation
@@ -242,7 +249,7 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                     ).first()
 
                     if not next_q:
-                        # Dynamic generate (JD + resume aware)
+                        # 卷面已预生成，此处仅在缺题时兜底（与 REST 通道逻辑一致）
                         job_title = interview.job.title if interview.job else "Java后端开发工程师"
                         q_data = await ai_provider.generate_question(
                             job_title=job_title,
@@ -254,14 +261,28 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                             jd_text=jd_text or None,
                             resume_context=resume_context or None
                         )
+                        text = q_data.get("question") or ""
+                        if not text:
+                            fb = next_fallback_question(
+                                [q.text for q in interview.questions],
+                                interview.total_questions, next_seq
+                            )
+                            text = fb["text"]
+                            q_data = {**fb, "question": text}
                         next_q = InterviewQuestion(
                             interview_id=interview_id,
                             parent_question_id=q_obj.id,
                             seq=next_seq,
-                            stage=q_data["stage"],
-                            skill_name=q_data["skill_name"],
-                            text=q_data["question"],
-                            difficulty=q_data["difficulty"],
+                            stage=q_data.get("stage") or "专业基础",
+                            question_type=q_data.get("question_type") or PROFESSIONAL,
+                            skill_name=q_data.get("skill_name") or job_title,
+                            text=text,
+                            difficulty=q_data.get("difficulty") or interview.difficulty,
+                            hints=q_data.get("hints"),
+                            time_limit_sec=q_data.get("time_limit_sec") or 180,
+                            reference_points_json=json.dumps(
+                                build_ai_reference_points(job_title, text), ensure_ascii=False
+                            ),
                             source="AI_GENERATED"
                         )
                         db.add(next_q)
@@ -269,15 +290,9 @@ async def handle_interview_websocket(websocket: WebSocket, interview_id: int):
                         db.refresh(next_q)
 
                     current_q = next_q
-                    await manager.send_json(interview_id, {
-                        "type": "next_question",
-                        "question_id": next_q.id,
-                        "text": next_q.text,
-                        "seq": next_q.seq,
-                        "stage": next_q.stage,
-                        "skill_name": next_q.skill_name,
-                        "difficulty": next_q.difficulty
-                    })
+                    payload = build_question_payload(next_q, reveal_reference=False)
+                    payload["type"] = "next_question"
+                    await manager.send_json(interview_id, payload)
 
             elif event_type == "pause":
                 interview.status = "PAUSED"

@@ -1,4 +1,5 @@
 import json
+import random
 from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,14 +14,113 @@ from app.models.interview import (
 )
 from app.models.resume import Resume
 from app.models.profile import CompetencyHistory, UserCompetency
+from app.models.question import QuestionBank
+from app.services.paper_builder import (
+    build_paper, paper_from_bank_ids, collect_job_skills, allocate_counts, resolve_ratio,
+    PROFESSIONAL, GENERAL, STRESS, Paper
+)
 from app.schemas.common import ResponseModel
 from app.schemas.interview import (
     InterviewCreate, InterviewOut, InterviewQuestionOut,
-    InterviewAnswerRequest, AnswerEvaluationOut, InterviewReportOut
+    InterviewAnswerRequest, AnswerEvaluationOut, InterviewReportOut,
+    PaperPreviewOut, PaperPreviewItem
 )
 from app.ai.provider import ai_provider
 
 router = APIRouter(tags=["AI 模拟面试与复盘"])
+
+# 题库为空（未灌库）时的兜底题，保证面试流程不中断
+FALLBACK_QUESTIONS = [
+    {"text": "请介绍一个你深度参与的项目，说明你负责的核心模块、遇到的最大技术难点以及最终的解决思路与量化收益。",
+     "question_type": "GENERAL", "skill_name": "项目经验", "stage": "项目深挖", "difficulty": "MEDIUM", "time_limit_sec": 240},
+    {"text": "在高并发场景下，你如何保障缓存与数据库的一致性？请说明至少两种方案的适用边界与取舍。",
+     "question_type": "PROFESSIONAL", "skill_name": "Redis", "stage": "专业基础", "difficulty": "MEDIUM", "time_limit_sec": 180},
+    {"text": "请说明一次线上故障的完整处置过程：发现问题后的第一步是什么，如何定位根因，事后做了哪些机制性改进？",
+     "question_type": "STRESS", "skill_name": "抗压能力", "stage": "压力应对", "difficulty": "HARD", "time_limit_sec": 150},
+    {"text": "你如何设计一个接口的幂等机制？请给出至少两种不同强度的方案，并说明各自的适用场景。",
+     "question_type": "PROFESSIONAL", "skill_name": "后端设计", "stage": "深度探究", "difficulty": "MEDIUM", "time_limit_sec": 180},
+    {"text": "谈谈你对所在岗位未来两年能力要求的理解，以及你计划如何补齐自身与要求之间的差距。",
+     "question_type": "GENERAL", "skill_name": "综合素养", "stage": "综合素养", "difficulty": "EASY", "time_limit_sec": 150},
+]
+
+
+def build_ai_reference_points(job_title: str, question_text: str) -> List[str]:
+    """AI 动态生成题的参考答案要点兜底（无预置要点时给出通用复盘指引）。"""
+    return [
+        f"围绕【{job_title}】岗位的核心要求展开，明确回答的结论与适用前提",
+        "给出原理/机制层面的解释，而不是只罗列使用方式或名词",
+        "结合候选人自己项目中的真实场景与量化数据佐证",
+        "主动说明方案的边界、代价与被放弃的备选方案及原因",
+        f"题目回顾：{question_text[:60]}{'…' if len(question_text) > 60 else ''}"
+    ]
+
+
+def question_to_out(q: InterviewQuestion, reveal_reference: bool = False) -> InterviewQuestionOut:
+    """题目序列化。
+
+    作答过程中不下发参考答案要点（reveal_reference=False），避免开卷作答；
+    面试结束（COMPLETED/CANCELLED）后的复盘阶段才下发。
+    """
+    points: List[str] = []
+    if reveal_reference and q.reference_points_json:
+        try:
+            parsed = json.loads(q.reference_points_json)
+            points = parsed if isinstance(parsed, list) else []
+        except Exception:
+            points = []
+    return InterviewQuestionOut(
+        id=q.id,
+        seq=q.seq,
+        stage=q.stage,
+        question_type=q.question_type or PROFESSIONAL,
+        skill_name=q.skill_name,
+        text=q.text,
+        difficulty=q.difficulty,
+        hints=q.hints,
+        time_limit_sec=q.time_limit_sec or 180,
+        source=q.source or "QUESTION_BANK",
+        reference_points=points,
+        reveal_reference=reveal_reference,
+        user_answer=q.answer.text if q.answer else None,
+        evaluation=None
+    )
+
+
+def build_question_payload(q: InterviewQuestion, reveal_reference: bool = False) -> dict:
+    """供 WebSocket 通道使用的题目字典（与 REST 下发字段保持一致）。"""
+    points: List[str] = []
+    if reveal_reference and q.reference_points_json:
+        try:
+            parsed = json.loads(q.reference_points_json)
+            points = parsed if isinstance(parsed, list) else []
+        except Exception:
+            points = []
+    return {
+        "question_id": q.id,
+        "id": q.id,
+        "seq": q.seq,
+        "text": q.text,
+        "stage": q.stage,
+        "question_type": q.question_type or PROFESSIONAL,
+        "skill_name": q.skill_name,
+        "difficulty": q.difficulty,
+        "hints": q.hints,
+        "time_limit_sec": q.time_limit_sec or 180,
+        "source": q.source or "QUESTION_BANK",
+        "reference_points": points,
+    }
+
+
+def next_fallback_question(used_texts: List[str], total: int, seq: int) -> dict:
+    """题库为空时的兜底组卷：优先取未使用过的题目，用尽后按序号生成变体。"""
+    pool = [q for q in FALLBACK_QUESTIONS if q["text"] not in (used_texts or [])]
+    if pool:
+        picked = random.choice(pool)
+    else:
+        base = FALLBACK_QUESTIONS[(seq - 1) % len(FALLBACK_QUESTIONS)]
+        picked = dict(base)
+    return dict(picked)
+
 
 def build_jd_text(job: Job = None, override: str = None) -> str:
     """优先使用用户输入/自动带出的 JD 文本，否则回退到岗位自身的 JD 字段。"""
@@ -68,14 +168,15 @@ def load_interview_context(interview: Interview, db: Session):
     return build_jd_text(job, interview.jd_text), build_resume_context(resume)
 
 def build_interview_out(interview: Interview) -> InterviewOut:
+    # 仅面试结束后下发参考答案，作答过程中保持"闭卷"
+    reveal = interview.status in ("COMPLETED", "CANCELLED", "EXPIRED")
     q_outs = []
     curr_q_out = None
     for q in sorted(interview.questions, key=lambda x: x.seq):
-        ans_text = q.answer.text if q.answer else None
-        eval_dict = None
+        q_item = question_to_out(q, reveal_reference=reveal)
         if q.answer and q.answer.evaluation:
             e = q.answer.evaluation
-            eval_dict = {
+            q_item.evaluation = {
                 "score": e.total_score,
                 "dimensions": json.loads(e.dimensions_json) if e.dimensions_json else {},
                 "evidence": json.loads(e.evidence_json) if e.evidence_json else [],
@@ -83,17 +184,6 @@ def build_interview_out(interview: Interview) -> InterviewOut:
                 "suggestions": json.loads(e.suggestions_json) if e.suggestions_json else [],
                 "next_action": e.next_action
             }
-
-        q_item = InterviewQuestionOut(
-            id=q.id,
-            seq=q.seq,
-            stage=q.stage,
-            skill_name=q.skill_name,
-            text=q.text,
-            difficulty=q.difficulty,
-            user_answer=ans_text,
-            evaluation=eval_dict
-        )
         q_outs.append(q_item)
         if q.seq == interview.current_question_seq:
             curr_q_out = q_item
@@ -122,6 +212,82 @@ def build_interview_out(interview: Interview) -> InterviewOut:
         questions=q_outs,
         current_question=curr_q_out
     )
+
+
+@router.get("/interviews/paper-ratio", response_model=ResponseModel[dict])
+def get_paper_ratio(mode: str = "COMPREHENSIVE", total_questions: int = 5,
+                    db: Session = Depends(get_db)):
+    """查询某面试模式的题型配比与题量分配（前端用于展示"5:3:2"说明）。"""
+    bank_total = db.query(QuestionBank).filter(QuestionBank.enabled == True).count()  # noqa: E712
+    ratio = dict(zip(["PROFESSIONAL", "GENERAL", "STRESS"], resolve_ratio(mode)))
+    return ResponseModel(data={
+        "mode": (mode or "COMPREHENSIVE").upper(),
+        "total_questions": max(1, int(total_questions or 1)),
+        "ratio": ratio,
+        "allocated": allocate_counts(mode, total_questions),
+        "bank_available": bank_total,
+        "bank_ready": bank_total > 0,
+    })
+
+
+@router.post("/interviews/paper-preview", response_model=ResponseModel[PaperPreviewOut])
+async def preview_paper(req: InterviewCreate, current_user: User = Depends(require_auth),
+                        db: Session = Depends(get_db)):
+    """组卷预览：不落库，返回将要抽到的题目（含参考答案，供用户确认考卷）。"""
+    job = db.query(Job).filter(Job.id == req.job_id).first() if req.job_id else None
+    bank_total = db.query(QuestionBank).filter(QuestionBank.enabled == True).count()  # noqa: E712
+
+    if not req.use_question_bank or bank_total == 0:
+        return ResponseModel(data=PaperPreviewOut(
+            mode=(req.mode or "COMPREHENSIVE").upper(),
+            total_questions=req.total_questions,
+            ratio=dict(zip(["PROFESSIONAL", "GENERAL", "STRESS"], resolve_ratio(req.mode))),
+            allocated=allocate_counts(req.mode, req.total_questions),
+            from_bank=0,
+            missing_for_ai={},
+            matched_category=(job.category if job else "通用"),
+            job_skills=collect_job_skills(job),
+            bank_available=bank_total,
+            questions=[]
+        ))
+
+    paper = build_paper(db, job, req.mode, req.difficulty, req.total_questions, count_usage=False)
+    return ResponseModel(data=PaperPreviewOut(
+        mode=paper.plan["mode"],
+        total_questions=req.total_questions,
+        ratio=paper.plan["ratio"],
+        allocated=paper.plan["allocated"],
+        from_bank=paper.plan["from_bank"],
+        missing_for_ai=paper.missing,
+        matched_category=paper.plan["matched_category"],
+        job_skills=paper.plan["job_skills"],
+        bank_available=paper.plan["bank_total"],
+        questions=[
+            PaperPreviewItem(
+                seq=s.seq, bank_id=s.bank_id, question_type=s.question_type,
+                skill_name=s.skill_name, stage=s.stage, difficulty=s.difficulty,
+                text=s.text, time_limit_sec=s.time_limit_sec, source=s.source
+            ) for s in paper.slots
+        ]
+    ))
+
+
+@router.get("/interviews/bank-stats", response_model=ResponseModel[dict])
+def get_bank_stats(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    """题库统计：按题型与岗位大类分布，用于前端展示题库覆盖情况。"""
+    rows = db.query(QuestionBank).filter(QuestionBank.enabled == True).all()  # noqa: E712
+    by_type: dict = {}
+    by_category: dict = {}
+    for r in rows:
+        by_type[r.question_type] = by_type.get(r.question_type, 0) + 1
+        by_category[r.job_category] = by_category.get(r.job_category, 0) + 1
+    return ResponseModel(data={
+        "total": len(rows),
+        "by_type": by_type,
+        "by_category": by_category,
+        "ready": len(rows) > 0,
+    })
+
 
 @router.post("/interviews", response_model=ResponseModel[InterviewOut])
 async def create_interview(req: InterviewCreate, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
@@ -170,43 +336,129 @@ async def create_interview(req: InterviewCreate, current_user: User = Depends(re
     db.commit()
     db.refresh(interview)
 
-    # Create interview plan
-    stages = [
-        {"stage": "专业基础", "questions_count": 2},
-        {"stage": "深度探究", "questions_count": 1},
-        {"stage": "项目深挖", "questions_count": 1},
-        {"stage": "系统设计", "questions_count": 1}
-    ]
-    plan = InterviewPlan(
-        interview_id=interview.id,
-        stages_json=json.dumps(stages, ensure_ascii=False),
-        total_questions=req.total_questions,
-        duration_minutes=req.duration_minutes
-    )
-    db.add(plan)
+    # ========== 组卷：优先结构化题库，缺口由 AI 补足 ==========
+    bank_total = db.query(QuestionBank).filter(QuestionBank.enabled == True).count()  # noqa: E712
+    paper = None
+    if req.use_question_bank and bank_total > 0:
+        if req.selected_bank_ids:
+            # 用户已在预览中确认考卷：按给定题库 ID 出题，保证"所见即所考"
+            chosen = paper_from_bank_ids(db, req.selected_bank_ids[:req.total_questions])
+            # 自动组卷仅用于补足名额，不计次（避免计到未实际使用的题上）
+            auto = build_paper(db, job, req.mode, req.difficulty, req.total_questions, count_usage=False)
+            slots = chosen + auto.slots[:max(0, req.total_questions - len(chosen))]
+            for i, s in enumerate(slots, start=1):
+                s.seq = i
+            paper = Paper(slots=slots, missing={}, plan=auto.plan)
+            paper.plan["from_bank"] = len(slots)
+            paper.plan["bank_ids"] = [s.bank_id for s in slots]
+            paper.plan["user_selected_paper"] = True
+            # 计次只算最终真正入卷的题目
+            final_ids = [s.bank_id for s in slots if s.bank_id]
+            if final_ids:
+                db.query(QuestionBank).filter(QuestionBank.id.in_(final_ids)).update(
+                    {QuestionBank.usage_count: QuestionBank.usage_count + 1}, synchronize_session=False
+                )
+        else:
+            paper = build_paper(db, job, req.mode, req.difficulty, req.total_questions)
 
-    # Generate Question 1 based on JD + resume
-    q1_data = await ai_provider.generate_question(
-        job_title=job_title,
-        seq=1,
-        difficulty=req.difficulty,
-        jd_text=jd_text,
-        resume_context=resume_context
-    )
-    q1 = InterviewQuestion(
-        interview_id=interview.id,
-        seq=1,
-        stage=q1_data["stage"],
-        skill_name=q1_data["skill_name"],
-        text=q1_data["question"],
-        difficulty=q1_data["difficulty"],
-        source="AI_GENERATED"
-    )
-    db.add(q1)
-    db.commit()
+    if paper and paper.slots:
+        for slot in paper.slots:
+            db.add(InterviewQuestion(interview_id=interview.id, **slot.to_interview_question_kwargs()))
+        # 题库缺口：按题型走 AI 兜底生成
+        missing_total = sum(paper.missing.values()) if paper.missing else 0
+        start_seq = len(paper.slots)
+        for i in range(missing_total):
+            q_data = await ai_provider.generate_question(
+                job_title=job_title, seq=start_seq + i + 1, difficulty=req.difficulty,
+                jd_text=jd_text, resume_context=resume_context
+            )
+            db.add(InterviewQuestion(
+                interview_id=interview.id,
+                seq=start_seq + i + 1,
+                stage=q_data.get("stage") or "专业基础",
+                question_type=PROFESSIONAL,
+                skill_name=q_data.get("skill_name") or job_title,
+                text=q_data.get("question") or "",
+                difficulty=q_data.get("difficulty") or req.difficulty,
+                hints=q_data.get("hints"),
+                time_limit_sec=180,
+                reference_points_json=json.dumps(
+                    build_ai_reference_points(job_title, q_data.get("question") or ""),
+                    ensure_ascii=False
+                ),
+                source="AI_GENERATED"
+            ))
+        stages = [{"stage": s.stage, "skill_name": s.skill_name, "question_type": s.question_type,
+                   "bank_id": s.bank_id, "seq": s.seq} for s in paper.slots]
+        plan = InterviewPlan(
+            interview_id=interview.id,
+            stages_json=json.dumps(stages, ensure_ascii=False),
+            paper_json=paper.snapshot_json,
+            total_questions=req.total_questions,
+            duration_minutes=req.duration_minutes
+        )
+        db.add(plan)
+        db.commit()
+    else:
+        # 未启用题库或题库为空：回退"逐题动态生成"模式（题库缺失时保证流程可用）
+        used_texts: List[str] = []
+        for seq in range(1, req.total_questions + 1):
+            q_data = await ai_provider.generate_question(
+                job_title=job_title,
+                seq=seq,
+                difficulty=req.difficulty,
+                last_question=used_texts[-1] if used_texts else None,
+                jd_text=jd_text,
+                resume_context=resume_context
+            )
+            text = q_data.get("question") or ""
+            if not text:
+                fb = next_fallback_question(used_texts, req.total_questions, seq)
+                text = fb["text"]
+                q_data = {**fb, "question": text}
+            used_texts.append(text)
+            db.add(InterviewQuestion(
+                interview_id=interview.id,
+                seq=seq,
+                stage=q_data.get("stage") or "专业基础",
+                question_type=q_data.get("question_type") or PROFESSIONAL,
+                skill_name=q_data.get("skill_name") or job_title,
+                text=text,
+                difficulty=q_data.get("difficulty") or req.difficulty,
+                hints=q_data.get("hints"),
+                time_limit_sec=q_data.get("time_limit_sec") or 180,
+                reference_points_json=json.dumps(
+                    build_ai_reference_points(job_title, text), ensure_ascii=False
+                ),
+                source="AI_GENERATED"
+            ))
+        stages = [
+            {"stage": "专业基础", "questions_count": 2},
+            {"stage": "深度探究", "questions_count": 1},
+            {"stage": "项目深挖", "questions_count": 1},
+            {"stage": "系统设计", "questions_count": 1}
+        ]
+        plan = InterviewPlan(
+            interview_id=interview.id,
+            stages_json=json.dumps(stages, ensure_ascii=False),
+            paper_json=json.dumps({"mode": (req.mode or "COMPREHENSIVE").upper(),
+                                   "from_bank": 0,
+                                   "reason": "question_bank_disabled_or_empty",
+                                   "ratio": dict(zip(["PROFESSIONAL", "GENERAL", "STRESS"], resolve_ratio(req.mode))),
+                                   "allocated": allocate_counts(req.mode, req.total_questions)},
+                                  ensure_ascii=False),
+            total_questions=req.total_questions,
+            duration_minutes=req.duration_minutes
+        )
+        db.add(plan)
+        db.commit()
+
     db.refresh(interview)
 
-    log_operation(db, current_user.id, current_user.email, "PERSONAL", "CREATE_INTERVIEW", "INTERVIEW", interview.id, f"创建面试仓会话【{req.mode}】")
+    source_desc = "题库组卷" if (paper and paper.slots) else "AI 动态生成"
+    log_operation(db, current_user.id, current_user.email, "PERSONAL", "CREATE_INTERVIEW",
+                  "INTERVIEW", interview.id,
+                  f"创建面试仓会话【{req.mode}｜{source_desc}｜{req.total_questions}题】")
 
     return ResponseModel(data=build_interview_out(interview))
 
@@ -313,12 +565,20 @@ async def answer_interview_question(id: int, req: InterviewAnswerRequest, curren
         answer.text = req.text
         db.commit()
 
-    # AI Evaluation using Rubric (JD + resume aware)
+    # AI Evaluation using Rubric (JD + resume + 题库参考答案要点 aware)
     jd_text, resume_context = load_interview_context(interview, db)
+    ref_points = None
+    if curr_q.reference_points_json:
+        try:
+            parsed = json.loads(curr_q.reference_points_json)
+            ref_points = parsed if isinstance(parsed, list) else None
+        except Exception:
+            ref_points = None
     eval_res = await ai_provider.evaluate_answer(
         curr_q.text, req.text, curr_q.seq,
         jd_text=jd_text or None,
-        resume_context=resume_context or None
+        resume_context=resume_context or None,
+        reference_points=ref_points
     )
 
     # Save evaluation
@@ -354,6 +614,7 @@ async def answer_interview_question(id: int, req: InterviewAnswerRequest, curren
             InterviewQuestion.seq == next_seq
         ).first()
 
+        # 卷面已在创建时预生成；此处仅在极端缺题时用 AI 兜底补一题
         if not next_q:
             job_title = interview.job.title if interview.job else "Java后端开发工程师"
             q_data = await ai_provider.generate_question(
@@ -366,28 +627,34 @@ async def answer_interview_question(id: int, req: InterviewAnswerRequest, curren
                 jd_text=jd_text or None,
                 resume_context=resume_context or None
             )
+            text = q_data.get("question") or ""
+            if not text:
+                fb = next_fallback_question([q.text for q in interview.questions],
+                                            interview.total_questions, next_seq)
+                text = fb["text"]
+                q_data = {**fb, "question": text}
             next_q = InterviewQuestion(
                 interview_id=id,
                 parent_question_id=curr_q.id,
                 seq=next_seq,
-                stage=q_data["stage"],
-                skill_name=q_data["skill_name"],
-                text=q_data["question"],
-                difficulty=q_data["difficulty"],
+                stage=q_data.get("stage") or "专业基础",
+                question_type=q_data.get("question_type") or PROFESSIONAL,
+                skill_name=q_data.get("skill_name") or job_title,
+                text=text,
+                difficulty=q_data.get("difficulty") or interview.difficulty,
+                hints=q_data.get("hints"),
+                time_limit_sec=q_data.get("time_limit_sec") or 180,
+                reference_points_json=json.dumps(
+                    build_ai_reference_points(job_title, text), ensure_ascii=False
+                ),
                 source="AI_GENERATED"
             )
             db.add(next_q)
             db.commit()
             db.refresh(next_q)
 
-        next_q_out = InterviewQuestionOut(
-            id=next_q.id,
-            seq=next_q.seq,
-            stage=next_q.stage,
-            skill_name=next_q.skill_name,
-            text=next_q.text,
-            difficulty=next_q.difficulty
-        )
+        # 作答中不下发参考答案，保持闭卷
+        next_q_out = question_to_out(next_q, reveal_reference=False)
 
     return ResponseModel(data=AnswerEvaluationOut(
         answer_id=answer.id,
@@ -536,11 +803,23 @@ def get_interview_report(id: int, current_user: User = Depends(require_auth), db
     for q in sorted(interview.questions, key=lambda x: x.seq):
         if q.answer and q.answer.evaluation:
             e = q.answer.evaluation
+            try:
+                ref_points = json.loads(q.reference_points_json) if q.reference_points_json else []
+                if not isinstance(ref_points, list):
+                    ref_points = []
+            except Exception:
+                ref_points = []
             q_analysis.append({
                 "seq": q.seq,
                 "question": q.text,
                 "answer": q.answer.text,
                 "score": e.total_score,
+                "question_type": q.question_type or PROFESSIONAL,
+                "stage": q.stage,
+                "skill_name": q.skill_name,
+                "difficulty": q.difficulty,
+                "source": q.source or "QUESTION_BANK",
+                "reference_points": ref_points,
                 "evidence": json.loads(e.evidence_json) if e.evidence_json else [],
                 "weaknesses": json.loads(e.weaknesses_json) if e.weaknesses_json else [],
                 "missing_knowledge": json.loads(e.missing_knowledge_json) if e.missing_knowledge_json else [],

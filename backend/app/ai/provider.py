@@ -91,13 +91,24 @@ class AIProvider:
         last_answer: str = None,
         last_score: float = None,
         jd_text: str = None,
-        resume_context: str = None
+        resume_context: str = None,
+        question_type: str = None
     ) -> Dict[str, Any]:
         """Dynamically generates interview question based on JD, resume and candidate's previous response."""
+        type_hint = ""
+        if question_type:
+            type_desc = {
+                "PROFESSIONAL": "a role-specific technical/professional question grounded in the JD skills",
+                "GENERAL": "a general/behavioral question (project deep-dive, collaboration, learning ability)",
+                "STRESS": "a pressure question that simulates a high-stress scenario (production incident, hostile challenge, tight deadline)"
+            }.get(question_type.upper(), "")
+            if type_desc:
+                type_hint = f"\nRequired question type: {question_type.upper()} — {type_desc}."
+
         prompt = (
             f"You are an expert technical interviewer conducting an interview for '{job_title}'.\n"
             f"Question sequence: {seq}\n"
-            f"Target stage: {stage} | Difficulty: {difficulty}\n\n"
+            f"Target stage: {stage} | Difficulty: {difficulty}{type_hint}\n\n"
             f"=== Job Description (JD) ===\n{(jd_text or 'N/A')[:2000]}\n\n"
             f"=== Candidate Resume ===\n{(resume_context or 'N/A')[:2000]}\n\n"
             f"Last question asked: {last_question or 'N/A'}\n"
@@ -107,7 +118,8 @@ class AIProvider:
             f"- Ground the question in the JD's required skills and the candidate's actual resume/projects.\n"
             f"- If the candidate answered with high technical depth, generate a deep follow-up probing edge cases, concurrency, or architectural trade-offs.\n"
             f"- If the candidate's answer was superficial or indicated lack of knowledge, generate a foundational question to diagnose core concepts.\n"
-            f"- Output JSON adhering to: question, skill_name, stage, difficulty, hints."
+            f"- Output JSON adhering to: question, skill_name, stage, difficulty, hints, "
+            f"question_type (PROFESSIONAL|GENERAL|STRESS), time_limit_sec (integer seconds, 120-300)."
         )
         real_res = await self._call_llm_json(prompt, QuestionGenSchema)
         if real_res:
@@ -121,19 +133,42 @@ class AIProvider:
             last_answer=last_answer,
             last_score=last_score
         )
+        if question_type:
+            raw_q["question_type"] = question_type
+        else:
+            # 按阶段推断题型，保证 mock 题也带题型标签
+            inferred_stage = raw_q.get("stage") or ""
+            if inferred_stage in ("综合素养", "基础素养"):
+                raw_q["question_type"] = "GENERAL"
+            elif inferred_stage == "压力应对":
+                raw_q["question_type"] = "STRESS"
+            else:
+                raw_q["question_type"] = "PROFESSIONAL"
         validated = QuestionGenSchema(**raw_q)
         return validated.model_dump()
 
     async def evaluate_answer(
-        self, question_text: str, answer_text: str, seq: int, jd_text: str = None, resume_context: str = None
+        self, question_text: str, answer_text: str, seq: int, jd_text: str = None,
+        resume_context: str = None, reference_points: List[str] = None
     ) -> Dict[str, Any]:
         """Evaluates single answer using the 6-dimension Rubric with JSON Schema validation."""
+        ref_block = ""
+        if reference_points:
+            points = "\n".join(f"- {p}" for p in reference_points[:6])
+            ref_block = (
+                "\n=== Reference Key Points (grading rubric anchor) ===\n"
+                f"{points}\n"
+                "Judge coverage of these key points explicitly: reward genuinely covered points, "
+                "and list uncovered ones in missing_knowledge.\n"
+            )
+
         prompt = (
             "You are a strict but fair technical interview evaluator.\n"
             "Score the candidate's answer on a 0-100 scale across 6 dimensions: "
             "professional(30%), relevance(20%), completeness(15%), logic(15%), depth(15%), communication(5%).\n\n"
             f"=== Job Description (JD) ===\n{(jd_text or 'N/A')[:1500]}\n\n"
-            f"=== Candidate Resume ===\n{(resume_context or 'N/A')[:1500]}\n\n"
+            f"=== Candidate Resume ===\n{(resume_context or 'N/A')[:1500]}\n"
+            f"{ref_block}\n"
             f"Question #{seq}: {question_text}\n"
             f"Candidate answer: {answer_text}\n\n"
             "Output JSON with keys: score (0-100 float), dimensions "
