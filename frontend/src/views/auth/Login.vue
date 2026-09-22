@@ -70,6 +70,25 @@
             <p class="form-desc">根据账号角色自动分流至求职者、企业或管理后台</p>
           </div>
 
+          <!-- Recently Used Accounts (saved locally, password never stored) -->
+          <div v-if="accountHistory.length" class="history-card">
+            <div class="history-head">
+              <span class="history-label">上次登录账号（点击一键填入）：</span>
+              <span class="history-clear" @click="clearHistory">清空</span>
+            </div>
+            <div class="pills-grid">
+              <span
+                v-for="acc in accountHistory"
+                :key="acc"
+                class="quick-pill history-pill"
+                :title="acc"
+                @click="fillHistoryAccount(acc)"
+              >
+                {{ acc }}
+              </span>
+            </div>
+          </div>
+
           <!-- Quick Autofill Demo Accounts -->
           <div class="demo-pills-card">
             <span class="demo-label">⚡ 快捷填入演示账号：</span>
@@ -104,6 +123,8 @@
               <el-form-item>
                 <el-input
                   v-model="loginForm.account"
+                  name="username"
+                  autocomplete="username"
                   placeholder="请输入手机号或邮箱"
                   prefix-icon="User"
                   size="large"
@@ -112,8 +133,11 @@
 
               <el-form-item>
                 <el-input
+                  ref="passwordInputRef"
                   v-model="loginForm.password"
                   type="password"
+                  name="password"
+                  autocomplete="current-password"
                   placeholder="请输入登录密码"
                   prefix-icon="Lock"
                   show-password
@@ -177,7 +201,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { reactive, ref, onMounted, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage } from 'element-plus'
@@ -192,14 +216,60 @@ const loginType = ref<'account' | 'sms'>('account')
 const countdown = ref(0)
 
 const loginForm = reactive({
-  account: 'student@example.com',
-  password: '123456',
+  account: '',
+  password: '',
   remember_me: true
 })
 
 const smsForm = reactive({
   phone: '13800138001',
   code: '123456'
+})
+
+/* ---------- 本地账号历史（仅存账号，绝不存密码） ---------- */
+const ACCOUNT_HISTORY_KEY = 'zh_login_accounts'
+const ACCOUNT_HISTORY_MAX = 5
+const accountHistory = ref<string[]>([])
+const passwordInputRef = ref()
+
+const loadAccountHistory = (): string[] => {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_HISTORY_KEY)
+    const list = raw ? JSON.parse(raw) : []
+    return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+const saveAccountHistory = (account: string) => {
+  const acc = account.trim()
+  if (!acc) return
+  const list = [acc, ...accountHistory.value.filter((x) => x !== acc)].slice(0, ACCOUNT_HISTORY_MAX)
+  accountHistory.value = list
+  localStorage.setItem(ACCOUNT_HISTORY_KEY, JSON.stringify(list))
+}
+
+const fillHistoryAccount = async (account: string) => {
+  loginType.value = 'account'
+  loginForm.account = account
+  loginForm.password = ''
+  await nextTick()
+  passwordInputRef.value?.focus()
+}
+
+const clearHistory = () => {
+  accountHistory.value = []
+  localStorage.removeItem(ACCOUNT_HISTORY_KEY)
+  ElMessage.success('已清空本地登录账号记录')
+}
+
+onMounted(() => {
+  accountHistory.value = loadAccountHistory()
+  // 自动回填最近一次登录的账号；密码留给浏览器密码管理器/用户手动输入
+  if (accountHistory.value.length) {
+    loginForm.account = accountHistory.value[0]
+  }
 })
 
 const fillAccount = (account: string, pwd: string) => {
@@ -236,6 +306,8 @@ const handleLogin = async () => {
   loading.value = true
   try {
     const res: any = await authStore.login({ account, password })
+    // 仅保存账号用于下次一键填入，密码不写入本地
+    saveAccountHistory(account)
     ElMessage.success('登录成功，正在进入工作台')
 
     const redirect = route.query.redirect as string
@@ -438,6 +510,48 @@ const handleLogin = async () => {
 .form-desc {
   font-size: 13px;
   color: var(--zh-text-muted);
+}
+
+/* Recently Used Accounts Card */
+.history-card {
+  background: #EFF6FF;
+  border: 1px solid #BFDBFE;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.history-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #1D4ED8;
+}
+
+.history-clear {
+  font-size: 11px;
+  color: var(--zh-text-muted);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.history-clear:hover {
+  color: #DC2626;
+}
+
+.history-pill {
+  background: #FFFFFF;
+  color: #1D4ED8;
+  border: 1px solid #93C5FD;
+  max-width: 175px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Demo Pills Card */

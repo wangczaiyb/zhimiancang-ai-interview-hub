@@ -6,7 +6,7 @@ echo   《智面舱 AI Interview Hub》一键启动服务
 echo ===================================================
 echo.
 echo [1/2] 正在启动后端服务 (FastAPI, 端口 8000)...
-start "智面舱 - 后端 API 服务 (Port: 8000)" cmd /k "cd /d "%~dp0backend" && python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
+start "智面舱 - 后端 API 服务 (Port: 8000)" cmd /k "cd /d "%~dp0backend" && "%~dp0.venv\Scripts\python.exe" -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
 
 echo [2/2] 正在启动前端服务 (Vite, 端口 5173)...
 start "智面舱 - 前端 Vite 服务 (Port: 5173)" cmd /k "cd /d "%~dp0frontend" && npm.cmd run dev"

@@ -8,7 +8,8 @@
 ## 一、 系统架构与工程目录
 
 ```
-d:\智能面试仓\
+ai-interview-hub/
+├── .venv/                    # Python 虚拟环境（依赖安装于此，已被 Git 忽略）
 ├── backend/                  # FastAPI 异步高性能后端
 │   ├── app/
 │   │   ├── ai/               # AI 引擎 (Mock沙箱 & Real双模式，Pydantic Schema 校验)
@@ -35,6 +36,9 @@ d:\智能面试仓\
 │   └── package.json          # Node 依赖与编译脚本
 │
 ├── uploads/                  # 本地上传目录（内容由 .gitignore 排除）
+├── start_all.bat             # Windows 一键启动（后端 .venv + 前端，双窗口）
+├── start_backend.bat         # 仅启动后端（使用 .venv 内的 uvicorn，端口 8000）
+├── start_frontend.bat        # 仅启动前端（Vite，端口 5173）
 ├── docker-compose.yml        # 生产容器编排 (MySQL 8 + Redis 7 + Backend + Frontend)
 ├── .env.example              # 环境变量配置模板
 └── .gitignore                # 排除依赖、构建产物、密钥、上传文件与本地数据库
@@ -56,15 +60,18 @@ d:\智能面试仓\
 
 ---
 
-## 三、 本地极速启动指南
+## 三、 本地极速启动指南（使用虚拟环境）
 
 ### 环境准备
 - **后端**: Python 3.10+ (已在 3.13 验证)
 - **前端**: Node.js 18+ (已在 Node 24 验证)
+- 后端依赖统一安装在**项目根目录的 `.venv` 虚拟环境**中，启动脚本（`start_*.bat`）默认调用 `.venv\Scripts\python.exe`。请勿直接使用系统 `python`（可能解析到 Anaconda 等其他环境，导致 `ModuleNotFoundError: No module named 'jose'` 之类缺依赖错误）。
 
-首次运行先在项目根目录创建本地环境变量文件（`.env` 已被 Git 忽略），并将其中的密码与 `SECRET_KEY` 替换为自己的值：
+### 首次运行准备
 
-```bash
+**1) 创建本地环境变量文件**（`.env` 已被 Git 忽略），并将其中的密码与 `SECRET_KEY` 替换为自己的值：
+
+```powershell
 # Windows PowerShell
 Copy-Item .env.example .env
 
@@ -72,34 +79,85 @@ Copy-Item .env.example .env
 cp .env.example .env
 ```
 
-### 1. 启动后端 API 服务
-```bash
-# 进入 backend 目录
-cd backend
+**2) 创建虚拟环境并安装后端依赖**（只需执行一次）：
 
-# 安装 Python 依赖 (如未安装)
-pip install -r requirements.txt
-
-# 首次运行，或需要重置并重新填充完整 Demo 数据时执行：
-python scripts/seed_demo.py
-
-# 启动 FastAPI 服务 (监听 8000 端口，含热重载)
-python main.py
+```powershell
+# Windows PowerShell（项目根目录）
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
-- 后端服务地址：`http://localhost:8000`
-- 交互式 Swagger API 文档：`http://localhost:8000/docs`
 
-### 2. 启动前端页面服务
 ```bash
-# 新开终端，进入 frontend 目录
-cd frontend
+# macOS / Linux
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r backend/requirements.txt
+```
 
-# 启动 Vite 开发服务器 (代理已配置 /api, /ws, /uploads)
+> Windows 若执行 `.venv\Scripts\Activate.ps1` 被执行策略拦截，可先运行
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`；不激活也没关系，
+> 直接用 `.venv\Scripts\python.exe` 完整路径调用即可。
+
+**3) 安装前端依赖**（只需执行一次）：
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+**4) （可选）初始化 Demo 种子数据**：首次运行、或需要重置并重新填充完整演示数据时执行：
+
+```powershell
+# Windows
+cd backend
+..\.venv\Scripts\python.exe scripts\seed_demo.py
+cd ..
+```
+
+```bash
+# macOS / Linux（已激活 .venv）
+cd backend && python scripts/seed_demo.py && cd ..
+```
+
+### 启动方式一：一键启动（推荐，Windows）
+
+在项目根目录**双击 `start_all.bat`**，会自动分别弹出两个窗口启动后端与前端：
+- 前端访问地址：http://localhost:5173
+- 后端 Swagger 接口文档：http://127.0.0.1:8000/docs
+
+也可以分开双击 `start_backend.bat`（仅后端）与 `start_frontend.bat`（仅前端）。
+
+### 启动方式二：命令行手动启动
+
+**后端 API 服务**（监听 8000 端口，含热重载）：
+
+```powershell
+# Windows PowerShell
+cd backend
+..\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+```bash
+# macOS / Linux（已激活 .venv）
+cd backend
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+**前端页面服务**（新开一个终端，Vite 已配置代理 `/api`、`/ws`、`/uploads` → 127.0.0.1:8000）：
+
+```bash
+cd frontend
 npm run dev
 ```
-- 前端访问地址：`http://localhost:5173`
 
-### 3. (可选) Docker 一键容器化编排运行
+- 后端服务地址：http://127.0.0.1:8000
+- 交互式 Swagger API 文档：http://127.0.0.1:8000/docs
+- 前端访问地址：http://localhost:5173
+
+### (可选) Docker 一键容器化编排运行
 ```bash
 # 确认已从 .env.example 创建并修改 .env，然后在项目根目录执行
 docker-compose up -d --build

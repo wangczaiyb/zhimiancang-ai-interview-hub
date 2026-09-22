@@ -18,7 +18,7 @@ class TokenResponse(BaseModel):
     company_id: Optional[int] = None
 
 class RegisterPersonalRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=50, description="用户真实姓名")
+    name: str = Field(..., min_length=1, max_length=50, description="用户名（虚拟名称）")
     phone: Optional[str] = None
     email: EmailStr
     password: str
